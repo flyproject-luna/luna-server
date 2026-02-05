@@ -1,42 +1,29 @@
 from flask import Flask, request, jsonify
-import datetime
 
 app = Flask(__name__)
 
-@app.get("/")
+@app.route("/", methods=["GET"])
 def home():
-    return "LUNA server running ✅"
+    return "LUNA server running ✅  Provo: /ask?q=pershendetje"
 
-@app.get("/ask")
+@app.route("/ask", methods=["GET"])
 def ask():
-    q = request.args.get("q", "").lower().strip()
+    q = request.args.get("q", "").strip().lower()
+
     if not q:
         return jsonify(ok=False, error="mungon parametri q"), 400
 
-    # ORA
+    # demo responses
     if "ora" in q:
-        now = datetime.datetime.now().strftime("%H:%M")
-        return jsonify(ok=True, answer=f"Ora tani është {now}")
+        answer = "Ora aktuale po vjen nga serveri."
+    elif "moti" in q:
+        answer = "Moti ne Londer eshte me re."
+    elif "luaj" in q:
+        answer = "Po e nis muziken qe kerkove."
+    else:
+        answer = f"Degjova: {q}"
 
-    # MOTI (placeholder – më vonë API reale)
-    if "moti" in q:
-        city = q.replace("moti ne", "").strip()
-        if not city:
-            city = "qytetin tend"
-        return jsonify(ok=True, answer=f"Moti në {city} është me diell ☀️")
-
-    # MUZIKË
-    if "luaj" in q:
-        song = q.replace("luaj", "").strip()
-        return jsonify(
-            ok=True,
-            action="play_music",
-            query=song,
-            answer=f"Po luaj {song}"
-        )
-
-    # DEFAULT
-    return jsonify(ok=True, answer=f"Nuk jam ende super inteligjente 😄 por kuptova: {q}")
+    return jsonify(ok=True, answer=answer)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
