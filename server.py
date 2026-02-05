@@ -17,6 +17,8 @@ def ask():
     answer = f"Pershendetje! Me shkruajte: {q}"
     return jsonify(ok=True, answer=answer)
 
+import os
+
 if __name__ == "__main__":
-    # host=0.0.0.0 -> akses nga telefoni në të njëjtin WiFi
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)
