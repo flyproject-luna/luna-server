@@ -4,26 +4,23 @@ app = Flask(__name__)
 
 @app.get("/")
 def home():
-    return "LUNA server running OK"
+    return "LUNA SERVER OK ✅  /ask?q=pyetja"
 
-@app.get("/esp32")
-def esp32():
-    q = request.args.get("q", "").strip().lower()
+@app.get("/ask")
+def ask():
+    q = request.args.get("q", "").strip()
 
     if not q:
-        return jsonify(ok=False, error="missing q"), 400
+        return jsonify(ok=False, error="Mungon parametri q"), 400
 
-    # LOGJIKË BAZË (demo)
-    if "ora" in q:
-        answer = "Ora aktuale është 12:00"
-    elif "mot" in q:
-        answer = "Moti është me diell"
-    elif "luaj" in q:
-        answer = "Po hap muzikën në YouTube"
-    else:
-        answer = f"Nuk e kuptova: {q}"
+    # DEMO response (pa AI akoma)
+    answer = f"E mora pyetjen: {q}"
 
-    return jsonify(ok=True, answer=answer)
+    return jsonify(
+        ok=True,
+        question=q,
+        answer=answer
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
