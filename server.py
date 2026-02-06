@@ -1,208 +1,185 @@
 import os
-import time
-import uuid
-import sqlite3
-from typing import Optional, List, Dict, Any
-
+import re
 import requests
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-APP_NAME = "luna-server"
+APP_TZ = os.getenv("APP_TZ", "Europe/Tirane")
+DEFAULT_CITY = os.getenv("DEFAULT_CITY", "Tirana")
 
-DB_PATH = os.getenv("DB_PATH", "luna.db")
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
+OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY", "")  # opsional, por duhet për motin
+GOOGLE_MAPS_KEY = os.getenv("GOOGLE_MAPS_KEY", "")  # opsional (trafik/distanca)
 
-app = FastAPI(title=APP_NAME)
+app = FastAPI(title="ESP32 Voice Backend", version="1.0")
 
-# ---------- DB ----------
-def db_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
 
-def init_db():
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS alarms (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL,
-            at_epoch INTEGER NOT NULL,
-            city TEXT DEFAULT '',
-            message TEXT DEFAULT '',
-            created_at INTEGER NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+# -----------------------
+# Helpers
+# -----------------------
+def now_local():
+    dt = datetime.now(ZoneInfo(APP_TZ))
+    return dt
 
-init_db()
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip()).lower()
 
-# ---------- Models ----------
-class AskIn(BaseModel):
-    device_id: str = Field(default="unknown")
-    text: str = Field(min_length=1, max_length=500)
-    city: Optional[str] = ""
+def mediawiki_summary(topic: str, lang: str = "sq") -> str:
+    """
+    Merr hyrjen (intro) pa HTML nga Wikipedia në gjuhën që zgjedh.
+    lang: "sq" ose "en" etj.
+    """
+    topic = topic.strip().replace(" ", "_")
+    endpoint = f"https://{lang}.wikipedia.org/w/api.php"
 
-class AskOut(BaseModel):
-    ok: bool
-    answer: str
+    params = {
+        "action": "query",
+        "prop": "extracts",
+        "exintro": "1",
+        "explaintext": "1",
+        "redirects": "1",
+        "titles": topic,
+        "format": "json",
+    }
 
-class AlarmSetIn(BaseModel):
-    device_id: str
-    at_epoch: int
-    city: Optional[str] = ""
-    message: Optional[str] = ""
+    r = requests.get(endpoint, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
 
-class AlarmOut(BaseModel):
-    ok: bool
-    id: str
+    pages = data.get("query", {}).get("pages", {})
+    if not pages:
+        return "S’po gjej asgjë në Wikipedia."
 
-class AlarmRow(BaseModel):
-    id: str
-    device_id: str
-    at_epoch: int
-    city: str
-    message: str
+    page = next(iter(pages.values()))
+    if "missing" in page:
+        return "S’po e gjej atë temë në Wikipedia."
 
-class AlarmListOut(BaseModel):
-    ok: bool
-    alarms: List[AlarmRow]
+    extract = (page.get("extract") or "").strip()
+    title = page.get("title", topic.replace("_", " "))
 
-class AlarmDeleteIn(BaseModel):
-    device_id: str
-    id: str
+    if not extract:
+        return f"Gjeta faqen “{title}”, por s’ka përmbajtje të lexueshme."
+    # Shkurto pak që të mos dalë roman:
+    if len(extract) > 700:
+        extract = extract[:700].rsplit(".", 1)[0] + "."
+    return f"{title}: {extract}"
 
-# ---------- Helpers ----------
-def now_epoch() -> int:
-    return int(time.time())
+def openweather_current(city: str) -> str:
+    if not OPENWEATHER_KEY:
+        return "S’kam OPENWEATHER_KEY. Vendose në env dhe je ok."
+    endpoint = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        "q": city,
+        "appid": OPENWEATHER_KEY,
+        "units": "metric",
+        "lang": "sq",
+    }
+    r = requests.get(endpoint, params=params, timeout=10)
+    if r.status_code != 200:
+        return f"S’po marr dot motin për {city}."
+    data = r.json()
+    temp = data["main"]["temp"]
+    feels = data["main"]["feels_like"]
+    desc = data["weather"][0]["description"]
+    return f"Në {city}: {desc}, {temp:.0f}°C (ndjehet si {feels:.0f}°C)."
 
-def normalize_text(s: str) -> str:
-    return " ".join((s or "").strip().split())
+def traffic_eta(origin: str, destination: str) -> str:
+    """
+    Opsionale: kërkon Google Maps Directions API.
+    """
+    if not GOOGLE_MAPS_KEY:
+        return "S’kam GOOGLE_MAPS_KEY (trafiku është opsional)."
+    endpoint = "https://maps.googleapis.com/maps/api/directions/json"
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "departure_time": "now",
+        "key": GOOGLE_MAPS_KEY,
+    }
+    r = requests.get(endpoint, params=params, timeout=10)
+    if r.status_code != 200:
+        return "S’po marr dot trafikun."
+    data = r.json()
+    routes = data.get("routes", [])
+    if not routes:
+        return "S’po gjej rrugë për atë destinacion."
+    leg = routes[0]["legs"][0]
+    dur = leg.get("duration_in_traffic", leg.get("duration", {})).get("text", "")
+    dist = leg.get("distance", {}).get("text", "")
+    return f"Me trafik: {dur}, distanca: {dist}."
 
-def weather_for_city(city: str) -> Optional[str]:
-    city = normalize_text(city)
-    if not city:
-        return None
-    if not OPENWEATHER_API_KEY:
-        return "Weather key missing on server (OPENWEATHER_API_KEY)."
-    try:
-        r = requests.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric"},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return f"Can't get weather for '{city}' (status {r.status_code})."
-        j = r.json()
-        temp = j["main"]["temp"]
-        desc = j["weather"][0]["description"]
-        hum = j["main"].get("humidity")
-        wind = j.get("wind", {}).get("speed")
-        return f"Weather in {city}: {temp:.1f}°C, {desc}. Humidity {hum}%, wind {wind} m/s."
-    except Exception as e:
-        return f"Weather error: {e}"
+def youtube_link(query: str) -> str:
+    """
+    Pa API key: thjesht link kërkimi YouTube (praktike për telefon/TV).
+    """
+    q = requests.utils.quote(query.strip())
+    return f"Hape këtë në YouTube: https://www.youtube.com/results?search_query={q}"
 
-def smart_reply(text: str, city: str) -> str:
-    t = normalize_text(text).lower()
 
-    # super bazë, por stabile (pa LLM key)
-    if "hi" in t or "hey" in t or "pershendetje" in t or "tung" in t:
-        return "Tung vlla. Jam gati."
+# -----------------------
+# Simple router (intents pa AI)
+# -----------------------
+def route(text: str) -> str:
+    t = normalize(text)
 
-    if "time" in t or "ora" in t:
-        return f"Ora (epoch) eshte: {now_epoch()}"
+    # Ora / data
+    if any(k in t for k in ["sa është ora", "sa eshte ora", "ora sa", "time"]):
+        dt = now_local()
+        return f"Ora është {dt.strftime('%H:%M')}."
+    if any(k in t for k in ["çfarë date", "cfare date", "data sot", "date"]):
+        dt = now_local()
+        return f"Sot është {dt.strftime('%d.%m.%Y')}."
 
-    if "weather" in t or "mot" in t:
-        w = weather_for_city(city) if city else "Shkruaj edhe qytetin (city)."
-        return w
+    # Moti
+    if "moti" in t or "weather" in t:
+        # nxjerr qytetin nëse e përmend: "moti ne durres"
+        m = re.search(r"(?:n[eë]\s+)([a-zçë\s]+)$", t)
+        city = DEFAULT_CITY
+        if m:
+            city = m.group(1).strip().title()
+        return openweather_current(city)
 
-    if "alarm" in t and ("list" in t or "shfaq" in t):
-        return "Per alarmet perdor endpoint: /alarm/list (device_id)."
+    # Wikipedia / MediaWiki
+    # shembuj: "wiki Skënderbeu", "wikipedia Albert Einstein", "kush eshte ...", "cfare eshte ..."
+    if t.startswith("wiki ") or t.startswith("wikipedia "):
+        topic = text.split(" ", 1)[1].strip()
+        return mediawiki_summary(topic, lang="sq")
+    if t.startswith("who is ") or t.startswith("what is "):
+        topic = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) == 3 else text
+        return mediawiki_summary(topic, lang="en")
+    if t.startswith("kush eshte ") or t.startswith("kush është "):
+        topic = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) == 3 else text
+        return mediawiki_summary(topic, lang="sq")
+    if t.startswith("cfare eshte ") or t.startswith("çfare eshte ") or t.startswith("çfarë është "):
+        topic = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) == 3 else text
+        return mediawiki_summary(topic, lang="sq")
 
-    if "help" in t or "ndihme" in t:
-        return (
-            "Komanda: "
-            "POST /ask {device_id,text,city} | "
-            "POST /alarm/set {device_id,at_epoch,city,message} | "
-            "GET /alarm/list?device_id=... | "
-            "POST /alarm/delete {device_id,id} | "
-            "GET /weather?city=..."
-        )
+    # Trafik (opsional)
+    # format: "trafik nga Tirana te Durres"
+    if t.startswith("trafik"):
+        m = re.search(r"nga\s+(.+?)\s+te\s+(.+)$", t)
+        if not m:
+            return "Shkruaje: trafik nga <origjina> te <destinacioni>."
+        origin = m.group(1).strip().title()
+        dest = m.group(2).strip().title()
+        return traffic_eta(origin, dest)
 
-    # fallback
-    return "E mora. Shkruaj me sakte: (mot/ora/alarm/help)."
+    # YouTube
+    # format: "luaj youtube emri i kenges"
+    if "youtube" in t or t.startswith("luaj "):
+        q = re.sub(r"^(luaj\s+)?(youtube\s+)?", "", text, flags=re.I).strip()
+        if not q:
+            return "Më thuaj çfarë të kërkoj në YouTube."
+        return youtube_link(q)
 
-# ---------- Routes ----------
-@app.get("/", response_class=PlainTextResponse)
-def root():
-    return "OK - luna-server"
+    return "S’e kapa. Provo: 'moti ne Tirane', 'wiki Skenderbeu', 'sa eshte ora', 'trafik nga Tirana te Durres', 'youtube ...'."
 
-@app.get("/health", response_class=PlainTextResponse)
-def health():
-    return "ok"
 
-@app.post("/ask", response_model=AskOut)
-def ask(payload: AskIn):
-    answer = smart_reply(payload.text, payload.city or "")
-    return AskOut(ok=True, answer=answer)
-
-@app.get("/weather", response_class=PlainTextResponse)
-def weather(city: str):
-    return weather_for_city(city) or "Missing city"
-
-@app.post("/alarm/set", response_model=AlarmOut)
-def alarm_set(payload: AlarmSetIn):
-    if payload.at_epoch < now_epoch() - 10:
-        raise HTTPException(status_code=400, detail="at_epoch is in the past")
-    alarm_id = str(uuid.uuid4())
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO alarms (id, device_id, at_epoch, city, message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (alarm_id, payload.device_id, int(payload.at_epoch), payload.city or "", payload.message or "", now_epoch()),
-    )
-    conn.commit()
-    conn.close()
-    return AlarmOut(ok=True, id=alarm_id)
-
-@app.get("/alarm/list", response_model=AlarmListOut)
-def alarm_list(device_id: str):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, device_id, at_epoch, city, message FROM alarms WHERE device_id=? ORDER BY at_epoch ASC",
-        (device_id,),
-    )
-    rows = [AlarmRow(**dict(r)) for r in cur.fetchall()]
-    conn.close()
-    return AlarmListOut(ok=True, alarms=rows)
-
-@app.post("/alarm/delete", response_class=PlainTextResponse)
-def alarm_delete(payload: AlarmDeleteIn):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM alarms WHERE id=? AND device_id=?", (payload.id, payload.device_id))
-    conn.commit()
-    deleted = cur.rowcount
-    conn.close()
-    if deleted == 0:
-        raise HTTPException(status_code=404, detail="not found")
-    return "ok"
-
-@app.get("/alarm/next", response_class=PlainTextResponse)
-def alarm_next(device_id: str):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, at_epoch, city, message FROM alarms WHERE device_id=? AND at_epoch>=? ORDER BY at_epoch ASC LIMIT 1",
-        (device_id, now_epoch()),
-    )
-    r = cur.fetchone()
-    conn.close()
-    if not r:
-        return ""
-    # format: id|epoch|city|message
-    return f"{r['id']}|{r['at_epoch']}|{r['city']}|{r['message']}"
+# -----------------------
+# API endpoint
+# -----------------------
+@app.get("/ask")
+def ask(text: str = Query(..., min_length=1)):
+    answer = route(text)
+    return JSONResponse({"ok": True, "text": text, "answer": answer})
