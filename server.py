@@ -1,145 +1,203 @@
 import os
 import time
+import re
+import sqlite3
 from typing import Optional, Dict, Any
 
-import requests
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+import httpx
+from fastapi import FastAPI, Query, HTTPException
+from pydantic import BaseModel
 
-app = FastAPI(title="luna-server")
-
+APP_NAME = "luna-server"
+DB_PATH = os.getenv("DB_PATH", "luna.db")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 
-# Alarm storage (simple in-memory).
-# NOTE: On Railway/Fly kjo humbet në restart. Për prodhim, kalo në DB (Redis/Postgres).
-ALARMS: Dict[str, Dict[str, Any]] = {}
-# structure:
-# ALARMS[device_id] = {"at_epoch": int, "city": str, "message": str, "fired": bool}
+app = FastAPI(title=APP_NAME)
 
+# -------------------- DB --------------------
+def db():
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
+
+def init_db():
+    con = db()
+    cur = con.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alarms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id TEXT NOT NULL,
+        at_epoch INTEGER NOT NULL,
+        city TEXT DEFAULT 'Tirane',
+        message TEXT DEFAULT '',
+        created_at INTEGER NOT NULL,
+        fired INTEGER DEFAULT 0
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_alarms_device_time ON alarms(device_id, at_epoch)")
+    con.commit()
+    con.close()
+
+init_db()
+
+# -------------------- Models --------------------
+class AlarmSetReq(BaseModel):
+    device_id: str
+    at_epoch: int
+    city: Optional[str] = "Tirane"
+    message: Optional[str] = ""
+
+# -------------------- Helpers --------------------
 def now_epoch() -> int:
     return int(time.time())
 
-def ok(answer: str):
-    return JSONResponse({"ok": True, "answer": answer})
+def norm_city(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
-def bad(msg: str, status: int = 400):
-    return JSONResponse({"ok": False, "error": msg}, status_code=status)
+async def fetch_weather(city: str) -> Dict[str, Any]:
+    if not OPENWEATHER_API_KEY:
+        return {"ok": False, "error": "OPENWEATHER_API_KEY missing"}
 
+    city = norm_city(city)
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        "q": city,
+        "appid": OPENWEATHER_API_KEY,
+        "units": "metric",
+        "lang": "sq"
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, params=params)
+        if r.status_code != 200:
+            try:
+                j = r.json()
+            except Exception:
+                j = {"message": r.text[:200]}
+            return {"ok": False, "error": f"weather error {r.status_code}: {j}"}
+
+        j = r.json()
+        desc = (j.get("weather") or [{}])[0].get("description", "")
+        temp = j.get("main", {}).get("temp")
+        feels = j.get("main", {}).get("feels_like")
+        hum = j.get("main", {}).get("humidity")
+        wind = j.get("wind", {}).get("speed")
+        return {
+            "ok": True,
+            "city": city,
+            "desc": desc,
+            "temp_c": temp,
+            "feels_c": feels,
+            "humidity": hum,
+            "wind_ms": wind
+        }
+
+def format_weather_simplified(w: Dict[str, Any]) -> str:
+    if not w.get("ok"):
+        return f"S’munda ta marr motin. {w.get('error','')}"
+    desc = w.get("desc", "")
+    temp = w.get("temp_c", "?")
+    feels = w.get("feels_c", "?")
+    hum = w.get("humidity", "?")
+    wind = w.get("wind_ms", "?")
+    return f"Moti ne {w.get('city')}: {desc}. Temp {temp}°C (ndihet {feels}°C). Lageshtia {hum}%. Era {wind} m/s."
+
+# -------------------- Routes --------------------
 @app.get("/")
 def root():
-    return ok("Luna server online. Use /health, /ask, /alarm/set, /alarm/next")
+    return {"status": "Luna server online", "service": APP_NAME, "time": now_epoch()}
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "luna-server", "ts": now_epoch()}
-
-def weather_text(city: str) -> str:
-    if not OPENWEATHER_API_KEY:
-        raise RuntimeError("OPENWEATHER_API_KEY missing")
-
-    url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "sq"}
-    r = requests.get(url, params=params, timeout=10)
-    data = r.json()
-
-    if r.status_code != 200:
-        # OpenWeather shpesh jep 404 city not found
-        msg = data.get("message", "weather error")
-        raise RuntimeError(f"Weather error {r.status_code}: {msg}")
-
-    main = data["main"]
-    wind = data.get("wind", {})
-    clouds = data.get("clouds", {})
-    weather_arr = data.get("weather", [])
-    desc = weather_arr[0].get("description", "") if weather_arr else ""
-
-    temp = float(main.get("temp", 0))
-    feels = float(main.get("feels_like", 0))
-    humidity = int(main.get("humidity", 0))
-    wind_ms = float(wind.get("speed", 0))
-    cloud_pct = int(clouds.get("all", 0))
-
-    return (
-        f"Moti në {city}: {desc}. "
-        f"Temp {temp:.1f}°C (ndihet {feels:.1f}°C). "
-        f"Lageshtia {humidity}%. Re {cloud_pct}%. Era {wind_ms:.1f} m/s."
-    )
+    return {"ok": True, "service": APP_NAME, "time": now_epoch()}
 
 @app.get("/ask")
-def ask(q: str = Query(..., min_length=1, max_length=200)):
+async def ask(q: str = Query(..., min_length=1)):
     text = q.strip().lower()
 
-    # Ora
-    if "ora" in text and len(text) <= 30:
+    # ora
+    if text in ["ora", "sa eshte ora", "time"]:
         t = time.localtime()
-        return ok(f"Ora tani është {t.tm_hour:02d}:{t.tm_min:02d}.")
+        return {"ok": True, "answer": f"Ora tani eshte {t.tm_hour:02d}:{t.tm_min:02d}."}
 
-    # Moti
-    if text.startswith("moti"):
-        # lejo: "moti ne tirane" / "moti tirane" / "moti në tiranë"
-        city = "Tirane"
-        parts = text.replace("ë", "e").split()
-        if "ne" in parts:
-            idx = parts.index("ne")
-            if idx + 1 < len(parts):
-                city = parts[idx + 1].capitalize()
-        elif len(parts) >= 2:
-            city = parts[-1].capitalize()
+    # moti ne <qytet>
+    m = re.search(r"moti\s+ne\s+(.+)$", text)
+    if m:
+        city = norm_city(m.group(1))
+        w = await fetch_weather(city)
+        return {"ok": True if w.get("ok") else False, "answer": format_weather_simplified(w), **({"weather": w} if w.get("ok") else {"error": w.get("error")})}
 
-        try:
-            return ok(weather_text(city))
-        except Exception as e:
-            return bad(str(e), 500)
+    # barcaleta (si ne screenshot)
+    if "barcalet" in text or "barcaleta" in text:
+        return {"ok": True, "answer": "Pse kompjuteri s’qeshi? Se kishte shume tabs hapur."}
 
-    # Shembull “inteligjence” pa OpenAI (rule-based).
-    # (Nqs do AI të vërtetë me model, bëhet, por mos posto çelësa këtu.)
-    if "formula e dallorit" in text or "dallori" in text:
-        return ok("Formula e dallorit: Δ = b² − 4ac.")
-
-    return ok(f"Luna dëgjoi: {q}")
+    # fallback
+    return {"ok": True, "answer": "Me thuaj: 'ora' ose 'moti ne Tirane' ose vendos nje alarm."}
 
 @app.post("/alarm/set")
-def alarm_set(
-    device_id: str = Query(..., min_length=1, max_length=64),
-    at_epoch: int = Query(..., ge=0),
-    city: str = Query("Tirane", min_length=1, max_length=64),
-    message: str = Query("Zgjohu dhe shkelqe sot!", min_length=1, max_length=200),
-):
-    # ruaj alarm
-    ALARMS[device_id] = {
-        "at_epoch": int(at_epoch),
-        "city": city,
-        "message": message,
-        "fired": False,
-        "set_at": now_epoch(),
-    }
-    return {"ok": True, "device_id": device_id, "alarm": ALARMS[device_id]}
+def alarm_set(req: AlarmSetReq):
+    if req.at_epoch < 1000000000:
+        raise HTTPException(status_code=400, detail="at_epoch duhet te jete UNIX epoch (sekonda).")
+
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO alarms(device_id, at_epoch, city, message, created_at, fired) VALUES (?,?,?,?,?,0)",
+        (req.device_id.strip(), int(req.at_epoch), (req.city or "Tirane").strip(), (req.message or "").strip(), now_epoch())
+    )
+    con.commit()
+    alarm_id = cur.lastrowid
+    con.close()
+    return {"ok": True, "alarm_id": alarm_id}
 
 @app.get("/alarm/next")
-def alarm_next(device_id: str = Query(..., min_length=1, max_length=64)):
-    a = ALARMS.get(device_id)
-    if not a:
-        return {"ok": True, "has_alarm": False}
-
-    # nqs ka rënë dhe s’e kemi “fired”, i kthejmë event
+def alarm_next(device_id: str, grace_sec: int = 30):
+    """
+    ESP32 e thirr kete endpoint çdo pak sekonda.
+    Kthen alarm nese eshte koha (now >= at_epoch) dhe s'eshte fired.
+    grace_sec = sa sekonda lejojme vonese pa e humbur alarmin.
+    """
+    device_id = device_id.strip()
     now = now_epoch()
-    at_epoch = int(a["at_epoch"])
-    fired = bool(a.get("fired", False))
+    con = db()
+    cur = con.cursor()
 
-    if (now >= at_epoch) and (not fired):
-        # shëno fired, dhe kthe payload me motin + mesazh
-        a["fired"] = True
-        city = a.get("city", "Tirane")
-        msg = a.get("message", "Zgjohu dhe shkelqe sot!")
+    # gjej alarmin me te afert qe eshte "due"
+    cur.execute(
+        """
+        SELECT * FROM alarms
+        WHERE device_id = ? AND fired = 0 AND at_epoch <= ? AND at_epoch >= ?
+        ORDER BY at_epoch ASC
+        LIMIT 1
+        """,
+        (device_id, now, now - abs(int(grace_sec)))
+    )
+    row = cur.fetchone()
+    if not row:
+        con.close()
+        return {"ok": True, "due": False}
 
-        weather = ""
-        try:
-            weather = weather_text(city)
-        except Exception:
-            weather = f"Moti në {city}: (s’u mor dot)."
+    # sheno fired qe mos perseritet
+    cur.execute("UPDATE alarms SET fired = 1 WHERE id = ?", (row["id"],))
+    con.commit()
+    con.close()
 
-        speak = f"{msg} {weather}"
-        return {"ok": True, "has_alarm": True, "fire": True, "speak": speak, "at_epoch": at_epoch}
+    return {
+        "ok": True,
+        "due": True,
+        "alarm": {
+            "id": row["id"],
+            "device_id": row["device_id"],
+            "at_epoch": row["at_epoch"],
+            "city": row["city"],
+            "message": row["message"]
+        }
+    }
 
-    # përndryshe thjesht status
-    return {"ok": True, "has_alarm": True, "fire": False, "at_epoch": at_epoch}
+@app.get("/weather")
+async def weather(city: str = "Tirane"):
+    w = await fetch_weather(city)
+    if not w.get("ok"):
+        return {"ok": False, "error": w.get("error")}
+    return {"ok": True, "weather": w, "text": format_weather_simplified(w)}
