@@ -1,14 +1,10 @@
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
 WORKDIR /app
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py .
+COPY . .
 
-# SHËNIM: ${PORT:-8080} është KRITIKE
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}"]
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "server.py"]
