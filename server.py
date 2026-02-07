@@ -1,185 +1,120 @@
 import os
 import re
 import requests
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from fastapi import FastAPI
+from fastapi.responses import Response
+from pydantic import BaseModel
 
-APP_TZ = os.getenv("APP_TZ", "Europe/Tirane")
-DEFAULT_CITY = os.getenv("DEFAULT_CITY", "Tirana")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 
-OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY", "")  # opsional, por duhet për motin
-GOOGLE_MAPS_KEY = os.getenv("GOOGLE_MAPS_KEY", "")  # opsional (trafik/distanca)
+app = FastAPI(title="luna-server")
 
-app = FastAPI(title="ESP32 Voice Backend", version="1.0")
+class AskReq(BaseModel):
+    text: str
+    city: str | None = "Tirana"
+    lang: str | None = "sq"
+    voice: str | None = "alloy"   # ndryshoje me vone sipas zërit që të pëlqen
+    format: str | None = "mp3"    # mp3 është më i lehtë për browser
 
+def _auth_headers():
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Missing OPENAI_API_KEY")
+    return {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
 
-# -----------------------
-# Helpers
-# -----------------------
-def now_local():
-    dt = datetime.now(ZoneInfo(APP_TZ))
-    return dt
+def safe_math(q: str) -> str | None:
+    q2 = q.strip().replace("x", "*").replace("X", "*")
+    if not re.fullmatch(r"[0-9\.\s\+\-\*\/\(\)\%]+", q2):
+        return None
+    try:
+        val = eval(q2, {"__builtins__": {}}, {})
+        if isinstance(val, (int, float)):
+            if abs(val - round(val)) < 1e-12:
+                return str(int(round(val)))
+            return str(val)
+    except Exception:
+        return None
+    return None
 
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip()).lower()
-
-def mediawiki_summary(topic: str, lang: str = "sq") -> str:
-    """
-    Merr hyrjen (intro) pa HTML nga Wikipedia në gjuhën që zgjedh.
-    lang: "sq" ose "en" etj.
-    """
-    topic = topic.strip().replace(" ", "_")
-    endpoint = f"https://{lang}.wikipedia.org/w/api.php"
-
-    params = {
-        "action": "query",
-        "prop": "extracts",
-        "exintro": "1",
-        "explaintext": "1",
-        "redirects": "1",
-        "titles": topic,
-        "format": "json",
-    }
-
-    r = requests.get(endpoint, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-
-    pages = data.get("query", {}).get("pages", {})
-    if not pages:
-        return "S’po gjej asgjë në Wikipedia."
-
-    page = next(iter(pages.values()))
-    if "missing" in page:
-        return "S’po e gjej atë temë në Wikipedia."
-
-    extract = (page.get("extract") or "").strip()
-    title = page.get("title", topic.replace("_", " "))
-
-    if not extract:
-        return f"Gjeta faqen “{title}”, por s’ka përmbajtje të lexueshme."
-    # Shkurto pak që të mos dalë roman:
-    if len(extract) > 700:
-        extract = extract[:700].rsplit(".", 1)[0] + "."
-    return f"{title}: {extract}"
-
-def openweather_current(city: str) -> str:
-    if not OPENWEATHER_KEY:
-        return "S’kam OPENWEATHER_KEY. Vendose në env dhe je ok."
-    endpoint = "https://api.openweathermap.org/data/2.5/weather"
-    params = {
-        "q": city,
-        "appid": OPENWEATHER_KEY,
-        "units": "metric",
-        "lang": "sq",
-    }
-    r = requests.get(endpoint, params=params, timeout=10)
+def openweather(city: str) -> str | None:
+    if not OPENWEATHER_API_KEY:
+        return None
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric"}
+    r = requests.get(url, params=params, timeout=15)
     if r.status_code != 200:
-        return f"S’po marr dot motin për {city}."
-    data = r.json()
-    temp = data["main"]["temp"]
-    feels = data["main"]["feels_like"]
-    desc = data["weather"][0]["description"]
-    return f"Në {city}: {desc}, {temp:.0f}°C (ndjehet si {feels:.0f}°C)."
+        return None
+    j = r.json()
+    temp = j["main"]["temp"]
+    desc = j["weather"][0]["description"]
+    return f"Moti në {city}: {temp:.0f}°C, {desc}."
 
-def traffic_eta(origin: str, destination: str) -> str:
-    """
-    Opsionale: kërkon Google Maps Directions API.
-    """
-    if not GOOGLE_MAPS_KEY:
-        return "S’kam GOOGLE_MAPS_KEY (trafiku është opsional)."
-    endpoint = "https://maps.googleapis.com/maps/api/directions/json"
-    params = {
-        "origin": origin,
-        "destination": destination,
-        "departure_time": "now",
-        "key": GOOGLE_MAPS_KEY,
+def luna_answer(text: str, city: str, lang: str) -> str:
+    # 1) math super shpejt
+    m = safe_math(text)
+    if m is not None:
+        return m
+
+    # 2) mot nëse pyet për mot
+    low = text.lower()
+    if any(w in low for w in ["mot", "temperatur", "shi", "diell", "weather"]):
+        w = openweather(city or "Tirana")
+        if w:
+            return w
+
+    # 3) LLM për gjithçka tjetër
+    sys = (
+        "Je Luna, asistente zanore në shqip. "
+        "Përgjigju shkurt, e dashur, dhe shumë e dobishme. "
+        "Nëse pyet për recetë: jep përbërësit + 4-6 hapa. "
+        "Nëse pyet për këshillë (p.sh. çfarë të gatuaj sot): sugjero 2 opsione dhe pse. "
+        "Mos përdor fjalë të pista."
+    )
+
+    payload = {
+        "model": "gpt-4.1-mini",
+        "input": [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": text}
+        ],
+        "max_output_tokens": 220
     }
-    r = requests.get(endpoint, params=params, timeout=10)
-    if r.status_code != 200:
-        return "S’po marr dot trafikun."
+
+    r = requests.post("https://api.openai.com/v1/responses", headers=_auth_headers(), json=payload, timeout=45)
+    if r.status_code >= 300:
+        return "Pati problem me trurin. Provo prap."
+
     data = r.json()
-    routes = data.get("routes", [])
-    if not routes:
-        return "S’po gjej rrugë për atë destinacion."
-    leg = routes[0]["legs"][0]
-    dur = leg.get("duration_in_traffic", leg.get("duration", {})).get("text", "")
-    dist = leg.get("distance", {}).get("text", "")
-    return f"Me trafik: {dur}, distanca: {dist}."
+    out = []
+    for item in data.get("output", []):
+        for c in item.get("content", []):
+            if c.get("type") == "output_text" and "text" in c:
+                out.append(c["text"])
+    ans = ("".join(out)).strip()
+    return ans or "S’e kapa tamam. Ma thuaj edhe një herë."
 
-def youtube_link(query: str) -> str:
-    """
-    Pa API key: thjesht link kërkimi YouTube (praktike për telefon/TV).
-    """
-    q = requests.utils.quote(query.strip())
-    return f"Hape këtë në YouTube: https://www.youtube.com/results?search_query={q}"
+def tts(text: str, voice: str, fmt: str) -> bytes:
+    payload = {
+        "model": "gpt-4o-mini-tts",
+        "voice": voice or "alloy",
+        "format": fmt or "mp3",
+        "input": text
+    }
+    r = requests.post("https://api.openai.com/v1/audio/speech", headers=_auth_headers(), json=payload, timeout=60)
+    if r.status_code >= 300:
+        raise RuntimeError(f"TTS error: {r.status_code} {r.text}")
+    return r.content
 
+@app.get("/health")
+def health():
+    return "ok"
 
-# -----------------------
-# Simple router (intents pa AI)
-# -----------------------
-def route(text: str) -> str:
-    t = normalize(text)
-
-    # Ora / data
-    if any(k in t for k in ["sa është ora", "sa eshte ora", "ora sa", "time"]):
-        dt = now_local()
-        return f"Ora është {dt.strftime('%H:%M')}."
-    if any(k in t for k in ["çfarë date", "cfare date", "data sot", "date"]):
-        dt = now_local()
-        return f"Sot është {dt.strftime('%d.%m.%Y')}."
-
-    # Moti
-    if "moti" in t or "weather" in t:
-        # nxjerr qytetin nëse e përmend: "moti ne durres"
-        m = re.search(r"(?:n[eë]\s+)([a-zçë\s]+)$", t)
-        city = DEFAULT_CITY
-        if m:
-            city = m.group(1).strip().title()
-        return openweather_current(city)
-
-    # Wikipedia / MediaWiki
-    # shembuj: "wiki Skënderbeu", "wikipedia Albert Einstein", "kush eshte ...", "cfare eshte ..."
-    if t.startswith("wiki ") or t.startswith("wikipedia "):
-        topic = text.split(" ", 1)[1].strip()
-        return mediawiki_summary(topic, lang="sq")
-    if t.startswith("who is ") or t.startswith("what is "):
-        topic = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) == 3 else text
-        return mediawiki_summary(topic, lang="en")
-    if t.startswith("kush eshte ") or t.startswith("kush është "):
-        topic = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) == 3 else text
-        return mediawiki_summary(topic, lang="sq")
-    if t.startswith("cfare eshte ") or t.startswith("çfare eshte ") or t.startswith("çfarë është "):
-        topic = text.split(" ", 2)[2].strip() if len(text.split(" ", 2)) == 3 else text
-        return mediawiki_summary(topic, lang="sq")
-
-    # Trafik (opsional)
-    # format: "trafik nga Tirana te Durres"
-    if t.startswith("trafik"):
-        m = re.search(r"nga\s+(.+?)\s+te\s+(.+)$", t)
-        if not m:
-            return "Shkruaje: trafik nga <origjina> te <destinacioni>."
-        origin = m.group(1).strip().title()
-        dest = m.group(2).strip().title()
-        return traffic_eta(origin, dest)
-
-    # YouTube
-    # format: "luaj youtube emri i kenges"
-    if "youtube" in t or t.startswith("luaj "):
-        q = re.sub(r"^(luaj\s+)?(youtube\s+)?", "", text, flags=re.I).strip()
-        if not q:
-            return "Më thuaj çfarë të kërkoj në YouTube."
-        return youtube_link(q)
-
-    return "S’e kapa. Provo: 'moti ne Tirane', 'wiki Skenderbeu', 'sa eshte ora', 'trafik nga Tirana te Durres', 'youtube ...'."
-
-
-# -----------------------
-# API endpoint
-# -----------------------
-@app.get("/ask")
-def ask(text: str = Query(..., min_length=1)):
-    answer = route(text)
-    return JSONResponse({"ok": True, "text": text, "answer": answer})
+@app.post("/ask-audio")
+def ask_audio(req: AskReq):
+    try:
+        answer = luna_answer(req.text, req.city or "Tirana", req.lang or "sq")
+        audio = tts(answer, req.voice or "alloy", req.format or "mp3")
+        media = "audio/mpeg" if (req.format or "mp3").lower() == "mp3" else "audio/wav"
+        return Response(content=audio, media_type=media, headers={"X-Luna-Text": answer[:200]})
+    except Exception:
+        return Response(content=b"", media_type="text/plain", status_code=500)
