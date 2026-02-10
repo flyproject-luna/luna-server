@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 
-MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip()
+MODEL = os.getenv("GROQY", "openai/gpt-4o-mini").strip()
 
 app = FastAPI()
 
@@ -97,12 +97,12 @@ def safe_eval_math(expr: str) -> str | None:
 
 
 def ask_llm(prompt: str) -> str:
-    if not OPENROUTER_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY missing")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY missing")
 
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
@@ -184,3 +184,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("server:app", host="0.0.0.0", port=port)
+
