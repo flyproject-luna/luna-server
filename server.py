@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from duckduckgo_search import DDGS  # Shto këtë për web search falas
+from ddgs import DDGS
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
@@ -197,3 +197,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("server:app", host="0.0.0.0", port=port)
+
