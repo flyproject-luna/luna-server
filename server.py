@@ -7,13 +7,16 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+# --------------------- KONFIGURIMI ---------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 
-MODEL = os.getenv("GROQY", "openai/gpt-4o-mini").strip()
+# Model FALAS dhe AKTIV në Groq (shkurt 2026) – super i shpejtë dhe me limite të larta
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
 
-app = FastAPI()
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+app = FastAPI(title="Luna Server – Groq Free Tier (llama-3.1-8b-instant)")
 
 class AskBody(BaseModel):
     text: str
@@ -25,12 +28,17 @@ class AskBody(BaseModel):
 
 @app.get("/")
 def root():
-    return "ok"
+    return {"status": "ok", "message": f"Luna Server po punon me {GROQ_MODEL} (falas & i shpejtë)"}
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "time_utc": datetime.now(timezone.utc).isoformat()}
+    return {
+        "ok": True,
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+        "groq_model": GROQ_MODEL,
+        "weather_key_set": bool(OPENWEATHER_API_KEY)
+    }
 
 
 def get_weather(city: str) -> str | None:
@@ -38,57 +46,40 @@ def get_weather(city: str) -> str | None:
         return None
     try:
         url = "https://api.openweathermap.org/data/2.5/weather"
-        params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "en"}
-        r = requests.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return None
+        params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "sq"}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
         data = r.json()
         temp = data["main"]["temp"]
         hum = data["main"]["humidity"]
         wind = data["wind"]["speed"]
         desc = data["weather"][0]["description"]
-        return f"Weather in {city}: {temp:.1f}°C, {desc}. Humidity {hum}%, wind {wind:.2f} m/s."
+        return f"Moti në {city}: {temp:.1f}°C, {desc}. Lagështia {hum}%, era {wind:.2f} m/s."
     except Exception:
         return None
 
 
-# ---- Safe math (server-side fallback) ----
-_ALLOWED_NODES = {
-    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
-    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
-    ast.USub, ast.UAdd, ast.Load, ast.Call, ast.Name
-}
-_ALLOWED_FUNCS = {
-    "sqrt": math.sqrt,
-    "abs": abs,
-    "round": round
-}
+# Math i sigurt lokal (fallback)
+_ALLOWED_NODES = {ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
+                  ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+                  ast.USub, ast.UAdd, ast.Load, ast.Call, ast.Name}
+_ALLOWED_FUNCS = {"sqrt": math.sqrt, "abs": abs, "round": round}
 _ALLOWED_NAMES = {"pi": math.pi, "e": math.e}
-
 
 def safe_eval_math(expr: str) -> str | None:
     expr = expr.strip()
-    if not expr:
-        return None
-    # allow only basic chars
-    if not re.fullmatch(r"[0-9\.\+\-\*\/\%\(\)\s\^a-zA-Z_]+", expr):
+    if not expr or not re.fullmatch(r"[0-9\.\+\-\*\/\%\(\)\s\^a-zA-Z_]+", expr):
         return None
     expr = expr.replace("^", "**")
-
     try:
         node = ast.parse(expr, mode="eval")
         for n in ast.walk(node):
             if type(n) not in _ALLOWED_NODES:
                 return None
-            if isinstance(n, ast.Call):
-                if not isinstance(n.func, ast.Name):
-                    return None
-                if n.func.id not in _ALLOWED_FUNCS:
-                    return None
-            if isinstance(n, ast.Name):
-                if n.id not in _ALLOWED_NAMES and n.id not in _ALLOWED_FUNCS:
-                    return None
-
+            if isinstance(n, ast.Call) and (not isinstance(n.func, ast.Name) or n.func.id not in _ALLOWED_FUNCS):
+                return None
+            if isinstance(n, ast.Name) and n.id not in _ALLOWED_NAMES and n.id not in _ALLOWED_FUNCS:
+                return None
         code = compile(node, "<expr>", "eval")
         val = eval(code, {"__builtins__": {}}, {**_ALLOWED_FUNCS, **_ALLOWED_NAMES})
         return str(val)
@@ -96,92 +87,93 @@ def safe_eval_math(expr: str) -> str | None:
         return None
 
 
-def ask_llm(prompt: str) -> str:
+def ask_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY missing")
+        raise HTTPException(500, "GROQ_API_KEY mungon – shtoje në env të Railway")
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    system = (
-        "You are Luna, a helpful Albanian AI assistant living in a smart clock device.\n"
-        "Rules:\n"
-        "- Be correct and practical.\n"
-        "- If user asks math, answer exactly and only the result + short explanation.\n"
-        "- If user asks for time/date, answer based on 'now' (current real time), not random dates.\n"
-        "- If user asks for recipe, give ingredients + steps.\n"
-        "- If something is missing (route for traffic etc.), ask ONE short question.\n"
-        "- Keep answers short, friendly, and not robotic.\n"
+    system_prompt = (
+        "Ti je Luna, një asistent miqësor dhe i zgjuar shqip në një orë smart ose altoparlant.\n"
+        "Përgjigju gjithmonë në shqip, natyrshëm, konciz dhe si një mik.\n"
+        "Për matematikë: jep vetëm rezultat + shpjegim të shkurtër.\n"
+        "Për orë/datë: përdor kohën reale.\n"
+        "Për receta: përbërës + hapa të qartë.\n"
+        "Nëse mungon diçka: pyet vetëm një pyetje të shkurtër.\n"
+        "Mos u bëj robotik – fol normal."
     )
 
     payload = {
-        "model": MODEL,
+        "model": GROQ_MODEL,
         "messages": [
-            {"role": "system", "content": system},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.4,
+        "temperature": 0.6,
         "max_tokens": 350,
     }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=35)
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"OpenRouter error: {r.text}")
-
-    data = r.json()
-    return data["choices"][0]["message"]["content"].strip()
+    try:
+        r = requests.post(GROQ_URL, headers=headers, json=payload, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(502, f"Gabim me Groq API: {str(e)}")
 
 
 @app.post("/ask")
 def ask(body: AskBody):
     text = (body.text or "").strip()
     if not text:
-        raise HTTPException(status_code=400, detail="Empty text")
+        raise HTTPException(400, "Teksti është bosh")
 
-    # Server-side quick math fallback (optional)
+    # Math fallback
     math_ans = safe_eval_math(text)
     if math_ans is not None:
-        return {"ok": True, "answer": f"{math_ans}"}
+        return {"ok": True, "answer": math_ans}
 
-    name = (body.name or "").strip()
-    city = (body.city or "").strip()
-    family = (body.family or "").strip()
-
+    # Konteksti
     ctx = []
-    if name:
-        ctx.append(f"User name: {name}")
-    if city:
-        ctx.append(f"User city: {city}")
-    if family:
-        ctx.append(f"Family: {family}")
+    if body.name:
+        ctx.append(f"Emri i përdoruesit: {body.name.strip()}")
+    if body.city:
+        ctx.append(f"Qyteti: {body.city.strip()}")
+    if body.family:
+        ctx.append(f"Familja: {body.family.strip()}")
 
-    w = None
-    if city:
-        w = get_weather(city)
-        if w:
-            ctx.append(w)
+    weather = None
+    if body.city:
+        weather = get_weather(body.city.strip())
+        if weather:
+            ctx.append(weather)
 
-    context_block = ""
-    if ctx:
-        context_block = "\n\nContext:\n- " + "\n- ".join(ctx) + "\n"
+    context_block = "\n\nKonteksti:\n" + "\n".join(f"- {line}" for line in ctx) + "\n" if ctx else ""
 
-    answer = ask_llm(text + context_block)
-    return {"ok": True, "answer": answer}
+    full_prompt = text + context_block
+
+    # Thirrja te Groq
+    try:
+        answer = ask_groq(full_prompt)
+        return {"ok": True, "answer": answer}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(500, f"Gabim server: {str(e)}")
 
 
 @app.get("/weather")
 def weather(city: str = "Tirana"):
     w = get_weather(city)
     if not w:
-        raise HTTPException(status_code=400, detail="Weather not available")
+        raise HTTPException(400, "Moti nuk u gjet")
     return {"ok": True, "answer": w}
 
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run("server:app", host="0.0.0.0", port=port)
-
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
