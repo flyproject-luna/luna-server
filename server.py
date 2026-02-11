@@ -1,9 +1,6 @@
 import os
-import re
-import ast
-import math
 import requests
-from datetime import datetime, timezone
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from ddgs import DDGS
@@ -12,7 +9,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "").strip()
 
-MODEL = os.getenv("GROQ_MODEL", "gemma2-9b-it").strip()  # Model i saktë dhe konciz
+MODEL = os.getenv("GROQ_MODEL", "gemma2-9b-it").strip()
 
 app = FastAPI(title="Luna Server")
 
@@ -50,32 +47,21 @@ def get_traffic(city: str = "Tirana") -> str | None:
     if not TOMTOM_API_KEY:
         return None
     try:
-        # Koordinata Tirana (41.3275, 19.8187) – mund të shtosh geocode më vonë
         url = "https://api.tomtom.com/traffic/services/4/incidents/search.json"
         params = {
             "key": TOMTOM_API_KEY,
-            "bbox": "19.7,41.2,19.9,41.4",  # Bounding box rreth Tiranës
-            "fields": "incidents{type,geometry{type,coordinates},properties{iconCategory,description}}",
+            "bbox": "19.7,41.2,19.9,41.4",
+            "fields": "incidents{type,properties{description}}",
             "language": "sq",
-            "limit": 3
+            "limit": 2
         }
         r = requests.get(url, params=params, timeout=8)
         r.raise_for_status()
         data = r.json()
         if not data.get("incidents"):
-            return f"Nuk ka incidente të raportuara në {city} tani."
-        incidents = data["incidents"]
-        desc = ", ".join(i["properties"]["description"] for i in incidents[:2])
+            return f"Nuk ka incidente në {city} tani."
+        desc = ", ".join(i["properties"]["description"] for i in data["incidents"])
         return f"Trafiku në {city}: {desc}"
-    except:
-        return None
-
-def safe_eval_math(expr: str) -> str | None:
-    expr = expr.strip()
-    if not re.fullmatch(r"[0-9\.\+\-\*\/\(\)\s]+", expr):
-        return None
-    try:
-        return str(eval(expr, {"__builtins__": {}}, {}))
     except:
         return None
 
@@ -90,8 +76,13 @@ def web_search(query: str) -> str:
         return ""
 
 def is_factual_query(text: str) -> bool:
-    keywords = ["çfarë", "kush", "ku", "kur", "pse", "sa", "si", "formula", "trafik", "moti", "histori"]
+    keywords = ["çfarë", "kush", "ku", "kur", "pse", "sa", "si", "formula", "trafik", "moti"]
     return any(word in text.lower() for word in keywords)
+
+def get_tts_url(text: str) -> str:
+    # Google TTS – zë femëror natyral shqip (tl=sq, Google e ka zë femëror default)
+    base = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=sq&total=1&idx=0&textlen=32&q="
+    return base + requests.utils.quote(text)
 
 def ask_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
@@ -104,9 +95,9 @@ def ask_groq(prompt: str) -> str:
 
     system = (
         "Ti je Luna, asistent inteligjent shqip.\n"
-        "Rregulla:\n"
-        "- Përgjigju vetëm me fakte të sakta.\n"
-        "- Fjali të shkurtra, të drejtpërdrejta.\n"
+        "Përgjigju:\n"
+        "- Vetëm me fakte të sakta.\n"
+        "- Fjali të shkurtra dhe të drejtpërdrejta.\n"
         "- Pa fjalë të panevojshme.\n"
         "- Pa përmendur burime ose links.\n"
         "- Nëse nuk ke të dhëna të sakta, thuaj 'Nuk e di saktë'.\n"
@@ -118,11 +109,8 @@ def ask_groq(prompt: str) -> str:
 
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,  # shumë i ulët për saktësi maksimale
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        "temperature": 0.2,
         "max_tokens": 150,
     }
 
@@ -136,11 +124,7 @@ def ask(body: AskBody):
     if not text:
         raise HTTPException(400, "Tekst bosh")
 
-    math_ans = safe_eval_math(text)
-    if math_ans is not None:
-        return {"ok": True, "answer": math_ans}
-
-    city = body.city or "Tirana"  # Default Tirana
+    city = body.city or "Tirana"
 
     ctx = []
     if body.name:
@@ -149,12 +133,10 @@ def ask(body: AskBody):
         ctx.append(f"Familja: {body.family}")
 
     w = get_weather(city)
-    if w:
-        ctx.append(w)
+    if w: ctx.append(w)
 
     t = get_traffic(city)
-    if t:
-        ctx.append(t)
+    if t: ctx.append(t)
 
     current_time = datetime.now().strftime("%H:%M")
     ctx.append(f"Ora aktuale: {current_time}")
@@ -168,7 +150,10 @@ def ask(body: AskBody):
     full_prompt = text + "\nKontekst:\n" + context if context else text
 
     answer = ask_groq(full_prompt)
-    return {"ok": True, "answer": answer}
+
+    audio_url = get_tts_url(answer)  # Zë femëror natyral shqip
+
+    return {"ok": True, "answer": answer, "audio_url": audio_url}
 
 if __name__ == "__main__":
     import uvicorn
