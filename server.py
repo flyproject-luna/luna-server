@@ -12,9 +12,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "").strip()
 
-MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
+# Model i fortë – ndryshoje nëse do (gemma2 ose llama-3.3-70b)
+MODEL = os.getenv("GROQ_MODEL", "gemma2-9b-it").strip()
 
-app = FastAPI(title="Luna - Asistent Inteligjent")
+app = FastAPI(title="Luna Server")
 
 class AskBody(BaseModel):
     text: str
@@ -31,8 +32,8 @@ def root():
 def health():
     return {"ok": True}
 
-def get_weather(city: str) -> str | None:
-    if not OPENWEATHER_API_KEY or not city:
+def get_weather(city: str = "Tirana") -> str | None:
+    if not OPENWEATHER_API_KEY:
         return None
     try:
         url = "https://api.openweathermap.org/data/2.5/weather"
@@ -46,11 +47,11 @@ def get_weather(city: str) -> str | None:
     except:
         return None
 
-def get_traffic(city: str) -> str | None:
-    if not TOMTOM_API_KEY or not city:
+def get_traffic(city: str = "Tirana") -> str | None:
+    if not TOMTOM_API_KEY:
         return None
     try:
-        # Koordinata shembull për Tiranën – mund të shtosh geocode për qytete të tjera
+        # Koordinata Tirana (ndryshoje nëse do geocode)
         url = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
         params = {"key": TOMTOM_API_KEY, "point": "41.3275,19.8187"}
         r = requests.get(url, params=params, timeout=10)
@@ -77,8 +78,7 @@ def web_search(query: str) -> str:
             results = [r for r in ddgs.text(query, max_results=2)]
         if not results:
             return ""
-        context = "\n".join(r["body"] for r in results)
-        return context
+        return "\n".join(r["body"] for r in results)
     except:
         return ""
 
@@ -96,17 +96,17 @@ def ask_groq(prompt: str) -> str:
     }
 
     system = (
-        "Ti je Luna, asistent inteligjent shqip si Alexa.\n"
+        "Ti je Luna, asistent inteligjent shqip.\n"
         "Përgjigju:\n"
-        "- Në shqip të pastër dhe korrekt\n"
-        "- Fjali të shkurtra dhe të drejtpërdrejta\n"
-        "- Pa fjalë banale, pa 'super', 'fantastik', 'wow'\n"
-        "- Pa përmendur burime ose links\n"
-        "- Verifiko fakte me 2 burime para se të përgjigjesh\n"
-        "- Nëse nuk je e sigurt, thuaj 'Nuk jam e sigurt'\n"
-        "- Për 'play [këngë]': thuaj 'Link: https://youtube.com/results?search_query=[këngë]'\n"
-        "- Për orë: 'Ora është HH:MM'\n"
-        "- Për trafik/moti: përdor kontekstin e dhënë\n"
+        "- Vetëm me fakte të sakta dhe të verifikuara.\n"
+        "- Në shqip të pastër, fjali të shkurtra dhe të drejtpërdrejta.\n"
+        "- Pa fjalë të panevojshme ose banale.\n"
+        "- Pa përmendur burime, links ose 'sipas...'.\n"
+        "- Nëse nuk ke të dhëna të sakta, thuaj 'Nuk e di saktë'.\n"
+        "- Për orën: përdor kohën aktuale.\n"
+        "- Për motin/trafikun: përdor vetëm të dhënat e dhëna.\n"
+        "- Për 'play [këngë]': thuaj 'Link: https://youtube.com/results?search_query=[këngë]'.\n"
+        "- Mos shpik informacion.\n"
     )
 
     payload = {
@@ -133,17 +133,25 @@ def ask(body: AskBody):
     if math_ans is not None:
         return {"ok": True, "answer": math_ans}
 
+    city = body.city or "Tirana"  # Default Tirana
+
     ctx = []
     if body.name:
         ctx.append(f"Emri: {body.name}")
-    if body.city:
-        ctx.append(f"Qyteti: {body.city}")
-        w = get_weather(body.city)
-        if w: ctx.append(w)
-        t = get_traffic(body.city)
-        if t: ctx.append(t)
     if body.family:
         ctx.append(f"Familja: {body.family}")
+
+    w = get_weather(city)
+    if w:
+        ctx.append(w)
+
+    t = get_traffic(city)
+    if t:
+        ctx.append(t)
+
+    # Orë reale nga serveri
+    current_time = datetime.now().strftime("%H:%M")
+    ctx.append(f"Ora aktuale: {current_time}")
 
     web = ""
     if is_factual_query(text):
