@@ -12,8 +12,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "").strip()
 
-# Model i fortë – ndryshoje nëse do (gemma2 ose llama-3.3-70b)
-MODEL = os.getenv("GROQ_MODEL", "gemma2-9b-it").strip()
+MODEL = os.getenv("GROQ_MODEL", "gemma2-9b-it").strip()  # Model i saktë dhe konciz
 
 app = FastAPI(title="Luna Server")
 
@@ -38,7 +37,7 @@ def get_weather(city: str = "Tirana") -> str | None:
     try:
         url = "https://api.openweathermap.org/data/2.5/weather"
         params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "sq"}
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=8)
         r.raise_for_status()
         data = r.json()
         temp = data["main"]["temp"]
@@ -51,15 +50,23 @@ def get_traffic(city: str = "Tirana") -> str | None:
     if not TOMTOM_API_KEY:
         return None
     try:
-        # Koordinata Tirana (ndryshoje nëse do geocode)
-        url = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
-        params = {"key": TOMTOM_API_KEY, "point": "41.3275,19.8187"}
-        r = requests.get(url, params=params, timeout=10)
+        # Koordinata Tirana (41.3275, 19.8187) – mund të shtosh geocode më vonë
+        url = "https://api.tomtom.com/traffic/services/4/incidents/search.json"
+        params = {
+            "key": TOMTOM_API_KEY,
+            "bbox": "19.7,41.2,19.9,41.4",  # Bounding box rreth Tiranës
+            "fields": "incidents{type,geometry{type,coordinates},properties{iconCategory,description}}",
+            "language": "sq",
+            "limit": 3
+        }
+        r = requests.get(url, params=params, timeout=8)
         r.raise_for_status()
         data = r.json()
-        speed = data["flowSegmentData"]["currentSpeed"]
-        free = data["flowSegmentData"]["freeFlowSpeed"]
-        return f"Trafiku në {city}: {speed} km/h (normale {free} km/h)."
+        if not data.get("incidents"):
+            return f"Nuk ka incidente të raportuara në {city} tani."
+        incidents = data["incidents"]
+        desc = ", ".join(i["properties"]["description"] for i in incidents[:2])
+        return f"Trafiku në {city}: {desc}"
     except:
         return None
 
@@ -97,16 +104,16 @@ def ask_groq(prompt: str) -> str:
 
     system = (
         "Ti je Luna, asistent inteligjent shqip.\n"
-        "Përgjigju:\n"
-        "- Vetëm me fakte të sakta dhe të verifikuara.\n"
-        "- Në shqip të pastër, fjali të shkurtra dhe të drejtpërdrejta.\n"
-        "- Pa fjalë të panevojshme ose banale.\n"
-        "- Pa përmendur burime, links ose 'sipas...'.\n"
+        "Rregulla:\n"
+        "- Përgjigju vetëm me fakte të sakta.\n"
+        "- Fjali të shkurtra, të drejtpërdrejta.\n"
+        "- Pa fjalë të panevojshme.\n"
+        "- Pa përmendur burime ose links.\n"
         "- Nëse nuk ke të dhëna të sakta, thuaj 'Nuk e di saktë'.\n"
         "- Për orën: përdor kohën aktuale.\n"
         "- Për motin/trafikun: përdor vetëm të dhënat e dhëna.\n"
         "- Për 'play [këngë]': thuaj 'Link: https://youtube.com/results?search_query=[këngë]'.\n"
-        "- Mos shpik informacion.\n"
+        "- Mos shpik asgjë.\n"
     )
 
     payload = {
@@ -115,8 +122,8 @@ def ask_groq(prompt: str) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
-        "max_tokens": 180,
+        "temperature": 0.2,  # shumë i ulët për saktësi maksimale
+        "max_tokens": 150,
     }
 
     r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=20)
@@ -149,7 +156,6 @@ def ask(body: AskBody):
     if t:
         ctx.append(t)
 
-    # Orë reale nga serveri
     current_time = datetime.now().strftime("%H:%M")
     ctx.append(f"Ora aktuale: {current_time}")
 
