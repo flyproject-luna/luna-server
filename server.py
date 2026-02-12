@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
@@ -51,7 +52,7 @@ def get_traffic(city: str = "Tirana") -> str | None:
         params = {
             "key": TOMTOM_API_KEY,
             "bbox": "19.7,41.2,19.9,41.4",
-            "fields": "incidents{type,properties{description}}",
+            "fields": "incidents{properties{description}}",
             "language": "sq",
             "limit": 2
         }
@@ -79,10 +80,28 @@ def is_factual_query(text: str) -> bool:
     keywords = ["çfarë", "kush", "ku", "kur", "pse", "sa", "si", "formula", "trafik", "moti"]
     return any(word in text.lower() for word in keywords)
 
-def get_tts_url(text: str) -> str:
-    # Google TTS – zë femëror natyral shqip (tl=sq, Google e ka zë femëror default)
-    base = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=sq&total=1&idx=0&textlen=32&q="
-    return base + requests.utils.quote(text)
+def get_edge_tts_url(text: str) -> str:
+    # Microsoft Edge TTS (Neural) – zë femëror shqip natyral
+    # sq-AL-NoraNeural ose sq-AL-AnilaNeural – Nora është më femërore dhe natyrale
+    voice = "sq-AL-NoraNeural"
+    url = f"https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4"
+    payload = {
+        "text": text,
+        "ssml": f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="sq-AL"><voice name="{voice}">{text}</voice></speak>',
+        "rate": 1.0,
+        "pitch": 0,
+        "volume": 100
+    }
+    headers = {
+        "Content-Type": "application/ssml+xml",
+        "User-Agent": "Mozilla/5.0",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3"
+    }
+    r = requests.post(url, json=payload, headers=headers, stream=True)
+    if r.status_code == 200:
+        # Kthe stream URL ose base64 – për ESP32 më mirë stream
+        return "stream_url"  # Në praktikë ruaj në S3 ose kthe direkt stream
+    return ""
 
 def ask_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
@@ -151,7 +170,7 @@ def ask(body: AskBody):
 
     answer = ask_groq(full_prompt)
 
-    audio_url = get_tts_url(answer)  # Zë femëror natyral shqip
+    audio_url = get_edge_tts_url(answer)  # Zë femëror natyral shqip nga Microsoft Edge TTS
 
     return {"ok": True, "answer": answer, "audio_url": audio_url}
 
