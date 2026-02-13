@@ -4,143 +4,82 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from ddgs import DDGS
 
 # ---------------- CONFIG ----------------
+GROQ_API_KEY = "CHELSI_JUAJ_KETU" 
+MODEL = "llama3-70b-8192"
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
-MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192").strip()
+app = FastAPI(title="Luna AI Core")
 
-app = FastAPI(title="Luna AI 2026")
-
-# ---------------- MODEL ----------------
+# Lista e qyteteve për validim lokal
+QYTETET_SHQIPERI = ["tirana", "durres", "vlore", "shkoder", "fier", "korce", "berat", "elbasan", "sarande", "kukes"]
+FJALE_BANALE = ["budall", "peder", "muta", "idiot"] # Shto të tjera këtu
 
 class AskBody(BaseModel):
-    text: Optional[str] = None
-    q: Optional[str] = None
+    text: str
     city: Optional[str] = "Tirana"
-    name: Optional[str] = None
-    family: Optional[str] = None
-    device_id: Optional[str] = None
 
-# ---------------- ROUTES ----------------
+# ---------------- LOGJIKA LOKALE ----------------
 
-@app.get("/")
-def root():
-    return {"status": "ok", "ai": "Luna 2026"}
+def kontrolli_lokal(text: str):
+    text_clean = text.lower()
+    
+    # 1. Filtri i fjalorit
+    if any(fjale in text_clean for fjale in FJALE_BANALE):
+        return "Më vjen keq, por unë komunikoj vetëm me edukatë."
+    
+    # 2. Pyetjet për orën
+    if "sa është ora" in text_clean or "ora tani" in text_clean:
+        tani = datetime.now().strftime("%H:%M")
+        return f"Ora është fiks {tani}."
+    
+    # 3. Përshëndetja Luna
+    if text_clean == "luna" or text_clean == "hej luna":
+        return "Po, të dëgjoj! Si mund të të ndihmoj?"
 
-@app.get("/health")
-def health():
-    return {"ok": True, "time": datetime.now().strftime("%H:%M:%S"), "model": MODEL}
+    return None
 
-# ---------------- WEATHER ----------------
+# ---------------- AI CORE ----------------
 
-def get_weather(city="Tirana"):
-    if not OPENWEATHER_API_KEY:
-        return ""
-
-    try:
-        r = requests.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params={
-                "q": city,
-                "appid": OPENWEATHER_API_KEY,
-                "units": "metric",
-                "lang": "sq"
-            },
-            timeout=6
-        )
-        r.raise_for_status()
-        d = r.json()
-        return f"Moti në {city}: {d['main']['temp']:.1f}°C, {d['weather'][0]['description']}."
-    except:
-        return ""
-
-# ---------------- WEB SEARCH ----------------
-
-def web_search(query):
-    try:
-        with DDGS() as ddgs:
-            results = [r for r in ddgs.text(query, max_results=2)]
-        return "\n".join(r["body"] for r in results)
-    except:
-        return ""
-
-# ---------------- GROQ ----------------
-
-def ask_ai(prompt):
-
-    if not GROQ_API_KEY:
-        return "GROQ_API_KEY mungon"
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+def ask_groq(prompt, qyteti):
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    
+    system_prompt = (
+        f"Ti je Luna, një asistente smart shqiptare. Përgjigju shkurt (max 2 fjali). "
+        f"Përdoruesi ndodhet në {qyteti}. Fol në mënyrë natyrale, jo si robot."
+    )
 
     payload = {
         "model": MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": "Ti je Luna, asistente inteligjente shqip. Jep përgjigje të sakta, të shkurtra, pa shpikje."
-            },
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.3,
-        "max_tokens": 180
+        "temperature": 0.5
     }
 
     try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=15
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=10)
+        return r.json()["choices"][0]["message"]["content"]
     except:
-        return "Gabim lidhje me AI"
+        return "Pati një problem me lidhjen time në cloud."
 
-# ---------------- ASK ----------------
+# ---------------- ENDPOINT ----------------
 
 @app.post("/ask")
-def ask(body: AskBody):
-
-    text = (body.text or body.q or "").strip()
-
-    if not text:
+async def ask(body: AskBody):
+    if not body.text.strip():
         raise HTTPException(400, "Tekst bosh")
 
-    city = body.city or "Tirana"
+    # Kontrollo fillimisht lokalisht (Kursen kohë/API)
+    pergjigje_lokale = kontrolli_lokal(body.text)
+    if pergjigje_lokale:
+        return {"ok": True, "answer": pergjigje_lokale, "source": "local"}
 
-    context_parts = []
-
-    context_parts.append(f"Ora: {datetime.now().strftime('%H:%M')}")
-
-    weather = get_weather(city)
-    if weather:
-        context_parts.append(weather)
-
-    if len(text.split()) > 6:
-        web = web_search(text)
-        if web:
-            context_parts.append(web)
-
-    full_prompt = text + "\n\nKontekst:\n" + "\n".join(context_parts)
-
-    answer = ask_ai(full_prompt)
-
-    return {
-        "ok": True,
-        "answer": answer
-    }
-
-# ---------------- RUN ----------------
+    # Nëse nuk është pyetje rutinë, pyet AI-në
+    ai_answer = ask_groq(body.text, body.city)
+    return {"ok": True, "answer": ai_answer, "source": "cloud"}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
