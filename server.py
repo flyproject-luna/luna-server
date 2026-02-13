@@ -6,9 +6,10 @@ from pydantic import BaseModel
 from typing import Optional
 
 # ---------------- CONFIG ----------------
-# Sigurohu që këto t'i kesh shtuar te "Variables" në Railway
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "CHELSI_JUAJ_KETU").strip()
-MODEL = "llama3-70b-8192"
+# Sigurohu që këtë ta kesh te Railway -> Variables
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+# Modeli më i qëndrueshëm aktualisht
+MODEL = "llama-3.3-70b-versatile"
 
 app = FastAPI(title="Luna AI Core")
 
@@ -18,34 +19,44 @@ class AskBody(BaseModel):
 
 # ---------------- LOGJIKA LOKALE ----------------
 def kontrolli_lokal(text: str):
-    text_clean = text.lower()
+    text_clean = text.lower().strip()
     
-    # Fjalë banale (Mbrojtja lokale)
-    fjalet_e_kqija = ["budall", "peder", "idiot"]
+    # 1. Filtri i mirësjelljes
+    fjalet_e_kqija = ["budall", "peder", "idiot", "muta", "pjerth"]
     if any(fjale in text_clean for fjale in fjalet_e_kqija):
-        return "Unë jam programuar të jem e sjellshme. Ju lutem flisni me edukatë."
+        return "Unë jam Luna dhe jam programuar të komunikoj vetëm me edukatë."
     
-    # Ora lokale
+    # 2. Ora dhe Data (Lokale)
     if "ora" in text_clean and "sa" in text_clean:
-        return f"Ora në Shqipëri është {datetime.now().strftime('%H:%M')}."
+        tani = datetime.now().strftime("%H:%M")
+        return f"Ora në Tiranë është fiks {tani}."
     
-    # Përshëndetja
-    if text_clean in ["luna", "hej luna", "tung luna"]:
-        return "Përshëndetje! Jam Luna, si mund t'ju ndihmoj sot?"
+    if "data" in text_clean or "data sot" in text_clean:
+        sot = datetime.now().strftime("%d/%m/%Y")
+        return f"Sot data është {sot}."
+    
+    # 3. Përshëndetja Luna
+    if text_clean in ["luna", "hej luna", "tung luna", "ç'kemi luna"]:
+        return "Përshëndetje! Jam Luna, asistenta jote shqiptare. Si mund të të ndihmoj?"
 
     return None
 
 # ---------------- AI CORE ----------------
 def ask_groq(prompt, qyteti):
-    if not GROQ_API_KEY or GROQ_API_KEY == "CHELSI_JUAJ_KETU":
-        return "Gabim: Mungon Groq API Key në server."
+    if not GROQ_API_KEY:
+        return "Gabim: Mungon GROQ_API_KEY në server."
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    system_msg = f"Ti je Luna, asistente smart. Ndodhesh në {qyteti}. Përgjigju shkurt e shqip."
+    # Instruksione strikte për personalitetin e Lunës
+    system_msg = (
+        f"Ti je Luna, një asistente inteligjente shqiptare. "
+        f"Ndodhesh në qytetin: {qyteti}. "
+        "Përgjigju gjithmonë në gjuhën shqipe, shkurt (maksimumi 2 fjali) dhe me mençuri."
+    )
     
     payload = {
         "model": MODEL,
@@ -53,7 +64,8 @@ def ask_groq(prompt, qyteti):
             {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.6
+        "temperature": 0.5,
+        "max_tokens": 150
     }
 
     try:
@@ -63,32 +75,36 @@ def ask_groq(prompt, qyteti):
             json=payload,
             timeout=10
         )
-        r.raise_for_status() # Kjo kap gabimet 401, 404, 500
-        return r.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.HTTPError as e:
-        return f"Gabim nga Groq: {e.response.status_code}"
-    except Exception as e:
-        print(f"Error: {e}")
-        return "Pati një problem me procesimin e kërkesës."
+        
+        if r.status_code != 200:
+            print(f"DEBUG: Groq Error {r.status_code} - {r.text}")
+            return f"Gabim nga AI (Kodi {r.status_code}). Provo përsëri."
 
-# ---------------- ENDPOINT ----------------
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"DEBUG: Exception - {str(e)}")
+        return "U shkëput lidhja me trurin tim në cloud."
+
+# ---------------- ENDPOINTS ----------------
+@app.get("/")
+def home():
+    return {"status": "Luna is online", "time": datetime.now().isoformat()}
+
 @app.post("/ask")
 async def ask(body: AskBody):
-    # 1. Kontrollo nëse teksti është bosh
-    if not body.text or len(body.text.strip()) == 0:
+    if not body.text.strip():
         return {"ok": False, "answer": "Nuk dëgjova asgjë."}
 
-    # 2. Kontrollo lokalisht (Kursen kohë dhe parandalon 502)
-    pergjigje = kontrolli_lokal(body.text)
-    if pergjigje:
-        return {"ok": True, "answer": pergjigje}
+    # Kontrollo fillimisht filtrat lokalë
+    pergjigje_lokale = kontrolli_lokal(body.text)
+    if pergjigje_lokale:
+        return {"ok": True, "answer": pergjigje_lokale}
 
-    # 3. Nëse nuk është pyetje rutinë, thirr AI
+    # Nëse s'është pyetje rutinë, thirr Groq
     ai_answer = ask_groq(body.text, body.city)
     return {"ok": True, "answer": ai_answer}
 
 if __name__ == "__main__":
     import uvicorn
-    # Railway kërkon PORT nga environment variables
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
