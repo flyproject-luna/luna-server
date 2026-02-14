@@ -3,18 +3,20 @@ import requests
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict
 
 # ---------------- CONFIG ----------------
-# Sigurohu që këtë ta kesh te Railway -> Variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-# Modeli më i qëndrueshëm aktualisht
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "llama-3.3-70b-8192"
 
-app = FastAPI(title="Luna AI Core")
+app = FastAPI(title="Luna AI Memory Core")
+
+# Memoria e bisedave: { "mac_address": [historia_e_mesazheve] }
+bisedat: Dict[str, List[Dict]] = {}
 
 class AskBody(BaseModel):
     text: str
+    device_id: Optional[str] = "unknown_device"
     city: Optional[str] = "Tirana"
 
 # ---------------- LOGJIKA LOKALE ----------------
@@ -22,50 +24,43 @@ def kontrolli_lokal(text: str):
     text_clean = text.lower().strip()
     
     # 1. Filtri i mirësjelljes
-    fjalet_e_kqija = ["budall", "peder", "idiot", "muta", "pjerth"]
-    if any(fjale in text_clean for fjale in fjalet_e_kqija):
-        return "Unë jam Luna dhe jam programuar të komunikoj vetëm me edukatë."
+    if any(fjale in text_clean for fjale in ["budall", "peder", "idiot", "muta"]):
+        return "Unë jam Luna dhe jam programuar të jem e sjellshme. Ju lutem flisni me edukatë."
     
-    # 2. Ora dhe Data (Lokale)
+    # 2. Pyetjet rutinë (pa AI)
     if "ora" in text_clean and "sa" in text_clean:
-        tani = datetime.now().strftime("%H:%M")
-        return f"Ora në Tiranë është fiks {tani}."
+        return f"Ora është fiks {datetime.now().strftime('%H:%M')}."
     
-    if "data" in text_clean or "data sot" in text_clean:
-        sot = datetime.now().strftime("%d/%m/%Y")
-        return f"Sot data është {sot}."
-    
-    # 3. Përshëndetja Luna
-    if text_clean in ["luna", "hej luna", "tung luna", "ç'kemi luna"]:
-        return "Përshëndetje! Jam Luna, asistenta jote shqiptare. Si mund të të ndihmoj?"
+    if text_clean in ["luna", "hej luna", "tung"]:
+        return "Po, të dëgjoj! Si mund të të ndihmoj?"
 
     return None
 
-# ---------------- AI CORE ----------------
-def ask_groq(prompt, qyteti):
-    if not GROQ_API_KEY:
-        return "Gabim: Mungon GROQ_API_KEY në server."
+# ---------------- AI CORE ME HISTORIK ----------------
+def ask_groq_with_memory(prompt: str, device_id: str, qyteti: str):
+    # Krijo historikun e ri nëse pajisja lidhet për herë të parë
+    if device_id not in bisedat:
+        bisedat[device_id] = [
+            {"role": "system", "content": f"Ti je Luna, asistente inteligjente shqiptare në {qyteti}. Përgjigju shkurt, shqip dhe mbaj mend bisedën."}
+        ]
+    
+    # Shto pyetjen e përdoruesit në memorie
+    bisedat[device_id].append({"role": "user", "content": prompt})
+    
+    # Limito memorien (System message + 10 mesazhet e fundit)
+    if len(bisedat[device_id]) > 11:
+        bisedat[device_id] = [bisedat[device_id][0]] + bisedat[device_id][-10:]
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Instruksione strikte për personalitetin e Lunës
-    system_msg = (
-        f"Ti je Luna, një asistente inteligjente shqiptare. "
-        f"Ndodhesh në qytetin: {qyteti}. "
-        "Përgjigju gjithmonë në gjuhën shqipe, shkurt (maksimumi 2 fjali) dhe me mençuri."
-    )
-    
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.5,
-        "max_tokens": 150
+        "messages": bisedat[device_id], # Dërgojmë gjithë historikun te Groq
+        "temperature": 0.6,
+        "max_tokens": 200
     }
 
     try:
@@ -73,36 +68,33 @@ def ask_groq(prompt, qyteti):
             "https://api.groq.com/openai/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=10
+            timeout=12
         )
+        r.raise_for_status()
+        pergjigja = r.json()["choices"][0]["message"]["content"].strip()
         
-        if r.status_code != 200:
-            print(f"DEBUG: Groq Error {r.status_code} - {r.text}")
-            return f"Gabim nga AI (Kodi {r.status_code}). Provo përsëri."
-
-        return r.json()["choices"][0]["message"]["content"].strip()
+        # Ruaj përgjigjen e AI në memorie për kontekstin e ardhshëm
+        bisedat[device_id].append({"role": "assistant", "content": pergjigja})
+        
+        return pergjigja
     except Exception as e:
-        print(f"DEBUG: Exception - {str(e)}")
-        return "U shkëput lidhja me trurin tim në cloud."
+        print(f"Error: {e}")
+        return "Më fal, u shkëput lidhja me memorien time."
 
 # ---------------- ENDPOINTS ----------------
-@app.get("/")
-def home():
-    return {"status": "Luna is online", "time": datetime.now().isoformat()}
-
 @app.post("/ask")
 async def ask(body: AskBody):
     if not body.text.strip():
         return {"ok": False, "answer": "Nuk dëgjova asgjë."}
 
-    # Kontrollo fillimisht filtrat lokalë
-    pergjigje_lokale = kontrolli_lokal(body.text)
-    if pergjigje_lokale:
-        return {"ok": True, "answer": pergjigje_lokale}
+    # Provo logjikën lokale (më e shpejtë)
+    lokal = kontrolli_lokal(body.text)
+    if lokal:
+        return {"ok": True, "answer": lokal}
 
-    # Nëse s'është pyetje rutinë, thirr Groq
-    ai_answer = ask_groq(body.text, body.city)
-    return {"ok": True, "answer": ai_answer}
+    # Përndryshe, pyet Groq me memorie
+    answer = ask_groq_with_memory(body.text, body.device_id, body.city)
+    return {"ok": True, "answer": answer}
 
 if __name__ == "__main__":
     import uvicorn
