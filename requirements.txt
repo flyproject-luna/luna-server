@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 requests
+gtts
 pydantic
-ddgs
-gTTS
-
+groq
