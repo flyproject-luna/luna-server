@@ -1,29 +1,89 @@
 import os
+import requests
 from gtts import gTTS
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, FileResponse
+from datetime import datetime, timedelta
+from pydantic import BaseModel
+from typing import Optional, List, Dict
 
-# ... pjesa tjetër e kodit (Groq, Moti etj.) ...
+app = FastAPI()
+bisedat: Dict[str, List[Dict]] = {}
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
+MODEL_AI = "llama-3.3-70b-versatile"
+
+class AskBody(BaseModel):
+    text: str
+    device_id: str = "web_user"
+
+# --- FAQJA E KONTROLLIT (HTML) ---
+@app.get("/", response_class=HTMLResponse)
+async def get_index():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Luna AI Controller</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
+            input { width: 80%; padding: 15px; border-radius: 25px; border: none; margin-bottom: 20px; font-size: 16px; }
+            button { background: #007bff; color: white; padding: 15px 30px; border: none; border-radius: 25px; cursor: pointer; font-size: 16px; }
+            #response { margin-top: 30px; font-style: italic; color: #bbb; line-height: 1.6; }
+            .status { color: #00ff00; font-size: 12px; margin-bottom: 10px; }
+        </style>
+    </head>
+    <body>
+        <h2>Luna AI</h2>
+        <div class="status">Lidhur me Havit M3 (via Phone BT)</div>
+        <input type="text" id="question" placeholder="Shkruaj pyetjen këtu...">
+        <br>
+        <button onclick="askLuna()">Dërgo Pyetjen</button>
+        <p id="response"></p>
+        <audio id="lunaAudio" style="display:none;"></audio>
+
+        <script>
+            async function askLuna() {
+                const q = document.getElementById('question').value;
+                const respDiv = document.getElementById('response');
+                const audio = document.getElementById('lunaAudio');
+                
+                respDiv.innerText = "Luna po mendohet...";
+                
+                const response = await fetch('/ask', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text: q, device_id: 'telefon_user'})
+                });
+                
+                const data = await response.json();
+                respDiv.innerText = data.answer;
+                
+                // Luaj audion
+                audio.src = '/get_audio?t=' + list.getTime(); // timestamp per refresh
+                audio.play();
+                document.getElementById('question').value = "";
+            }
+        </script>
+    </body>
+    </html>
+    """
 
 @app.post("/ask")
 async def ask(body: AskBody):
-    # 1. Merr tekstin nga Luna (ashtu siç e bëmë radhën e kaluar)
-    luna_text = ask_luna_logic(body.text, body.device_id) 
-
-    # 2. Gjenero audion në Shqip
-    audio_filename = "luna_voice.mp3"
-    tts = gTTS(text=luna_text, lang='sq')
-    tts.save(audio_filename)
-
-    # 3. Kthe përgjigjen
-    # ESP32 do të lexojë "answer" për tekstin dhe do të shkojë te 
-    # linku i audios për ta shkarkuar dhe luajtur në boks
-    return {
-        "ok": True, 
-        "answer": luna_text, 
-        "audio_url": f"https://{os.getenv('RAILWAY_STATIC_URL')}/get_audio"
-    }
+    # Logjika e Lunës (siç e kishim)
+    luna_answer = ask_luna_logic(body.text, body.device_id) # Perdor funksionin qe kemi bere me pare
+    
+    # Gjenero Zërin
+    tts = gTTS(text=luna_answer, lang='sq')
+    tts.save("luna_voice.mp3")
+    
+    return {"answer": luna_answer}
 
 @app.get("/get_audio")
 async def get_audio():
-    # Ky endpoint dërgon skedarin MP3 te ESP32
-    return FileResponse("luna_voice.mp3", media_type="audio/mpeg")
+    return FileResponse("luna_voice.mp3")
+
+# Shto ketu funksionin ask_luna_logic qe ndertuam me pare...
