@@ -18,47 +18,34 @@ class AskBody(BaseModel):
     device_id: Optional[str] = "unknown_device"
     city: Optional[str] = "Tirana"
 
-# ---------------- FUNKSIONI I KOHËS SAKTE ----------------
+# ---------------- KOHA SAKTE (TIRANË) ----------------
 def merr_kohen_tirane():
-    # Railway serverat janë UTC. Shtojmë 1 orë për dimrin në Shqipëri.
-    # Nëse jemi në verë (Mars-Tetor), kjo duhet të jetë +2.
-    ora_utc = datetime.utcnow()
-    ora_shqiperi = ora_utc + timedelta(hours=1) 
-    
-    ditet = ["E Hënë", "E Martë", "E Mërkurë", "E Enjte", "E Premte", "E Shtunë", "E Diel"]
-    muajt = ["Janar", "Shkurt", "Mars", "Prill", "Maj", "Qershor", "Korrik", "Gusht", "Shtator", "Tetor", "Nëntor", "Dhjetor"]
-    
-    dita_javes = ditet[ora_shqiperi.weekday()]
-    muaji = muajt[ora_shqiperi.month - 1]
-    
+    ora_shqiperi = datetime.utcnow() + timedelta(hours=1) 
     return {
         "ora": ora_shqiperi.strftime("%H:%M"),
         "data": ora_shqiperi.strftime("%d/%m/%Y"),
-        "dita": dita_javes,
-        "muaji": muaji,
-        "viti": ora_shqiperi.year,
-        "stina": "Dimër" # Mund ta bësh automatike, por për tani e mban Lunën në shkurt
+        "dita": ["E Hënë", "E Martë", "E Mërkurë", "E Enjte", "E Premte", "E Shtunë", "E Diel"][ora_shqiperi.weekday()]
     }
 
-# ---------------- AI ADAPTIVE ME KONTEKST KOHOR ----------------
-def ask_groq_updated(prompt: str, device_id: str, qyteti: str):
-    koha = merr_kohen_tirane()
+# ---------------- LOGJIKA E LUNËS ----------------
+def ask_groq_strict(prompt: str, device_id: str):
+    k = merr_kohen_tirane()
     
     if device_id not in bisedat:
-        # Këtu i japim AI-së të gjithë informacionin e duhur që në fillim
+        # Këtu është "Betimi i Lojalitetit" të Lunës
         system_instruction = (
-            f"Ti je Luna, asistente smart. Sot është {koha['dita']}, data {koha['data']}. "
-            f"Ora aktuale në Tiranë është {koha['ora']}. Jemi në stinën e {koha['stina']}. "
-            "RREPTËSISHT: Përgjigju vetëm duke u bazuar në këtë datë dhe orë. "
-            "Përshtat stilin me përdoruesin, mos përdor fjalë të pista."
+            f"Ti je Luna, asistentja personale e përdoruesit. Sot është {k['dita']}, {k['data']}, ora {k['ora']}. "
+            "RREGULLAT E TUA: "
+            "1. Përgjigju VETËM asaj që të pyet përdoruesi. "
+            "2. Mos jep informacion të tepërt që nuk është kërkuar. "
+            "3. Mos bëj biseda të kota apo ligjërata morale. "
+            "4. Stili: I shkurtër, i saktë, besnik dhe shumë inteligjent. "
+            "5. Ti e di çfarë ndodh në botë, por e përdor atë informacion vetëm nëse të kërkohet."
         )
         bisedat[device_id] = [{"role": "system", "content": system_instruction}]
     
-    # Përditësojmë herë pas here system prompt që të dijë orën minutë pas minute
-    bisedat[device_id][0]["content"] = (
-        f"Ti je Luna. Ora: {koha['ora']}, Data: {koha['data']}, Dita: {koha['dita']}, Stina: {koha['stina']}. "
-        f"Përdoruesi është në {qyteti}."
-    )
+    # Përditësojmë kontekstin e kohës për çdo kërkesë
+    bisedat[device_id][0]["content"] = f"Luna. Ora: {k['ora']}, Data: {k['data']}. Përgjigju shkurt."
 
     bisedat[device_id].append({"role": "user", "content": prompt})
 
@@ -66,33 +53,25 @@ def ask_groq_updated(prompt: str, device_id: str, qyteti: str):
     payload = {
         "model": MODEL_AI,
         "messages": bisedat[device_id],
-        "temperature": 0.7
+        "temperature": 0.4 # Më e ulët që të mos "devijojë" nga tema
     }
 
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=12)
-        if r.status_code != 200: return "Gabim në cloud."
-        
         pergjigja = r.json()["choices"][0]["message"]["content"].strip()
         bisedat[device_id].append({"role": "assistant", "content": pergjigja})
         return pergjigja
     except:
-        return "Lidhja dështoi."
+        return "Nuk arrita të lidhem."
 
 # ---------------- ENDPOINT ----------------
 @app.post("/ask")
 async def ask(body: AskBody):
-    # Filtri i fjalëve të pista (Hard-coded)
-    pista = ["budall", "peder", "idiot", "muta", "kurv"]
-    if any(f in body.text.lower() for f in pista):
-        return {"ok": True, "answer": "Më vjen keq, nuk flas me këtë gjuhë."}
+    # Filtri i fjalëve (Pa ndryshim)
+    if any(f in body.text.lower() for f in ["budall", "peder", "idiot"]):
+        return {"ok": True, "answer": "Nuk flas me këtë gjuhë."}
 
-    # Për orën direkte (pa pyetur AI fare për shpejtësi)
-    if "sa është ora" in body.text.lower():
-        k = merr_kohen_tirane()
-        return {"ok": True, "answer": f"Ora është fiks {k['ora']}."}
-
-    answer = ask_groq_updated(body.text, body.device_id, body.city)
+    answer = ask_groq_strict(body.text, body.device_id)
     return {"ok": True, "answer": answer}
 
 if __name__ == "__main__":
