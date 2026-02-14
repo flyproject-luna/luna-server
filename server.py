@@ -64,3 +64,54 @@ if __name__ == "__main__":
     # Railway kerkon porten nga variabla PORT
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    return """
+    <html>
+        <head>
+            <title>Luna AI</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: sans-serif; text-align: center; background: #0f172a; color: white; padding-top: 50px; }
+                input { padding: 15px; width: 80%; border-radius: 10px; border: none; font-size: 16px; }
+                button { padding: 15px 30px; margin-top: 20px; border-radius: 10px; background: #38bdf8; border: none; font-weight: bold; cursor: pointer; }
+                #status { margin-top: 20px; color: #94a3b8; }
+            </style>
+        </head>
+        <body>
+            <h1>Luna AI 🎙️</h1>
+            <input type="text" id="msg" placeholder="Pyet diçka...">
+            <br>
+            <button onclick="pyet()">DËRGO</button>
+            <p id="status"></p>
+            <audio id="audioPlayer" controls style="display:none"></audio>
+
+            <script>
+                async function pyet() {
+                    const txt = document.getElementById('msg').value;
+                    document.getElementById('status').innerText = "Luna po mendohet...";
+                    
+                    const res = await fetch('/ask', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({text: txt})
+                    });
+                    
+                    const data = await res.json();
+                    document.getElementById('status').innerText = data.answer;
+                    
+                    // Luaj zërin automatikisht
+                    const player = document.getElementById('audioPlayer');
+                    player.src = '/get_audio?t=' + new Date().getTime();
+                    player.play();
+                }
+            </script>
+        </body>
+    </html>
+    """
+
