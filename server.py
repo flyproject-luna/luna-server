@@ -2,7 +2,7 @@ import os
 import asyncio
 import requests
 import edge_tts
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List
@@ -10,12 +10,12 @@ from typing import Optional, Dict, List
 app = FastAPI()
 
 # --- KONFIGURIMI ---
+# Sigurohu që i ke vendosur te Settings -> Variables në Railway
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 MODEL_AI = "llama-3.1-8b-instant"
 
-# Variablat globale për sinkronizimin me ESP32
-bisedat: Dict[str, List[Dict]] = {}
 audio_ready = False
+bisedat: Dict[str, List[Dict]] = {}
 
 class AskBody(BaseModel):
     text: str
@@ -30,35 +30,21 @@ async def gjenero_ze_femer(text):
         print(f"Gabim TTS: {e}")
         return False
 
-# --- NDËRFAQJA PËR TELEFONIN ---
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return """
     <html>
-        <head>
-            <title>Luna AI - Kontrolli</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body { font-family: sans-serif; background: #0f172a; color: white; text-align: center; padding: 30px; }
-                .box { background: #1e293b; padding: 25px; border-radius: 20px; border: 1px solid #334155; }
-                input { width: 100%; padding: 15px; border-radius: 10px; border: none; margin: 15px 0; font-size: 16px; }
-                button { width: 100%; padding: 15px; border-radius: 10px; background: #38bdf8; border: none; font-weight: bold; cursor: pointer; }
-                #status { margin-top: 20px; color: #38bdf8; font-style: italic; }
-            </style>
-        </head>
-        <body>
-            <div class="box">
-                <h1>Luna AI 🎙️</h1>
-                <p>Zëri do të dalë te Havit M3 via ESP32</p>
-                <input type="text" id="msg" placeholder="Shkruaj pyetjen këtu...">
-                <button onclick="pyet()">DËRGO LUNËS</button>
-                <div id="status">Gati.</div>
-            </div>
+        <head><title>Luna AI</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+        <body style="font-family:sans-serif; background:#0f172a; color:white; text-align:center; padding:50px;">
+            <h1>Luna AI 🎙️</h1>
+            <input type="text" id="msg" style="padding:15px; width:80%; border-radius:10px; border:none; font-size:16px;">
+            <br><br>
+            <button onclick="pyet()" style="padding:15px 30px; border-radius:10px; background:#38bdf8; border:none; font-weight:bold; cursor:pointer;">DËRGO</button>
+            <div id="status" style="margin-top:20px; color:#38bdf8;">Lidhur me ESP32 & Havit M3.</div>
             <script>
                 async function pyet() {
                     const input = document.getElementById('msg');
                     const status = document.getElementById('status');
-                    if(!input.value) return;
                     status.innerText = "Luna po mendohet...";
                     try {
                         const res = await fetch('/ask', {
@@ -69,19 +55,18 @@ async def home():
                         const data = await res.json();
                         status.innerText = data.answer;
                         input.value = "";
-                    } catch (e) { status.innerText = "Gabim lidhjeje."; }
+                    } catch (e) { status.innerText = "Gabim ne server."; }
                 }
             </script>
         </body>
     </html>
     """
 
-# --- LOGJIKA E AI DHE STATUSIT ---
 @app.post("/ask")
 async def ask(body: AskBody):
     global audio_ready
     if body.device_id not in bisedat:
-        bisedat[body.device_id] = [{"role": "system", "content": "Ti je Luna, asistente femër e ëmbël. Përgjigju shkurt në shqip."}]
+        bisedat[body.device_id] = [{"role": "system", "content": "Ti je Luna, asistente femer. Fol shqip dhe shkurt."}]
     
     bisedat[body.device_id].append({"role": "user", "content": body.text})
     
@@ -92,13 +77,12 @@ async def ask(body: AskBody):
         r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
         pergjigja = r.json()["choices"][0]["message"]["content"].strip()
         
-        # Gjenerojmë audion
         if await gjenero_ze_femer(pergjigja):
-            audio_ready = True # Lajmërojmë ESP32
+            audio_ready = True
             
         return {"answer": pergjigja}
     except Exception as e:
-        return {"answer": "Gabim teknik."}
+        return {"answer": "Error gjate bisedes."}
 
 @app.get("/status")
 async def get_status():
@@ -107,9 +91,7 @@ async def get_status():
 
 @app.get("/get_audio")
 async def get_audio():
-    if os.path.exists("luna_voice.mp3"):
-        return FileResponse("luna_voice.mp3", media_type="audio/mpeg")
-    return {"error": "Jo audio"}
+    return FileResponse("luna_voice.mp3")
 
 @app.get("/done")
 async def set_done():
