@@ -4,135 +4,118 @@ import requests
 import edge_tts
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 
 app = FastAPI()
 
-# --- KONFIGURIMI I VARIABLAYE ---
-# Sigurohu që i ke vendosur këto te Settings -> Variables në Railway
+# --- KONFIGURIMI ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "").strip()
-MODEL_AI = "llama3-8b-8192"  # Model më i shpejtë dhe i qëndrueshëm
+MODEL_AI = "llama-3.1-8b-instant"
 
-# Memoria e bisedave
+# Variablat globale për sinkronizimin me ESP32
 bisedat: Dict[str, List[Dict]] = {}
+audio_ready = False
 
 class AskBody(BaseModel):
     text: str
     device_id: Optional[str] = "web_user"
 
-# Funksioni për kohën dhe motin
-def merr_kontekstin():
-    ora_shqiperi = datetime.utcnow() + timedelta(hours=1)
-    koha = ora_shqiperi.strftime("%H:%M")
-    data = ora_shqiperi.strftime("%d/%m/%Y")
-    moti = "Moti: Tiranë, 14°C."
-    if OPENWEATHER_API_KEY:
-        try:
-            url = f"http://api.openweathermap.org/data/2.5/weather?q=Tirana&appid={OPENWEATHER_API_KEY}&units=metric&lang=sq"
-            r = requests.get(url, timeout=2).json()
-            moti = f"Tiranë: {r['main']['temp']}°C, {r['weather'][0]['description']}."
-        except: pass
-    return koha, data, moti
-
-# --- FUNKSIONI I ZERIT (Edge-TTS Falas) ---
 async def gjenero_ze_femer(text):
     try:
         communicate = edge_tts.Communicate(text, "sq-AL-AlbaNeural")
         await communicate.save("luna_voice.mp3")
         return True
-    except:
+    except Exception as e:
+        print(f"Gabim TTS: {e}")
         return False
 
-# --- FAQJA WEB ---
+# --- NDËRFAQJA PËR TELEFONIN ---
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return """
-    <!DOCTYPE html>
-    <html lang="sq">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>LUNA AI</title>
-        <style>
-            body { font-family: sans-serif; background: #0f172a; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-            .chat-box { width: 90%; max-width: 450px; background: #1e293b; padding: 30px; border-radius: 24px; text-align: center; border: 1px solid #334155; }
-            h1 { color: #38bdf8; }
-            input { width: 100%; padding: 15px; border-radius: 12px; border: none; margin-bottom: 15px; font-size: 16px; }
-            button { width: 100%; padding: 15px; border-radius: 12px; border: none; background: #0284c7; color: white; font-weight: bold; cursor: pointer; }
-            #status { margin-top: 20px; color: #38bdf8; font-style: italic; }
-        </style>
-    </head>
-    <body>
-        <div class="chat-box">
-            <h1>Luna AI 🎙️</h1>
-            <input type="text" id="msg" placeholder="Shkruaj këtu..." onkeypress="if(event.key==='Enter') pyet()">
-            <button onclick="pyet()">DËRGO</button>
-            <div id="status">Gati.</div>
-        </div>
-        <audio id="player" style="display:none"></audio>
-        <script>
-            async function pyet() {
-                const input = document.getElementById('msg');
-                const status = document.getElementById('status');
-                const player = document.getElementById('player');
-                if(!input.value) return;
-                status.innerText = "Luna po mendohet...";
-                try {
-                    const response = await fetch('/ask', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({text: input.value})
-                    });
-                    const data = await response.json();
-                    status.innerText = data.answer;
-                    player.src = '/get_audio?t=' + new Date().getTime();
-                    player.play();
-                    input.value = "";
-                } catch (e) { status.innerText = "Error në server."; }
-            }
-        </script>
-    </body>
+    <html>
+        <head>
+            <title>Luna AI - Kontrolli</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: sans-serif; background: #0f172a; color: white; text-align: center; padding: 30px; }
+                .box { background: #1e293b; padding: 25px; border-radius: 20px; border: 1px solid #334155; }
+                input { width: 100%; padding: 15px; border-radius: 10px; border: none; margin: 15px 0; font-size: 16px; }
+                button { width: 100%; padding: 15px; border-radius: 10px; background: #38bdf8; border: none; font-weight: bold; cursor: pointer; }
+                #status { margin-top: 20px; color: #38bdf8; font-style: italic; }
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <h1>Luna AI 🎙️</h1>
+                <p>Zëri do të dalë te Havit M3 via ESP32</p>
+                <input type="text" id="msg" placeholder="Shkruaj pyetjen këtu...">
+                <button onclick="pyet()">DËRGO LUNËS</button>
+                <div id="status">Gati.</div>
+            </div>
+            <script>
+                async function pyet() {
+                    const input = document.getElementById('msg');
+                    const status = document.getElementById('status');
+                    if(!input.value) return;
+                    status.innerText = "Luna po mendohet...";
+                    try {
+                        const res = await fetch('/ask', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({text: input.value})
+                        });
+                        const data = await res.json();
+                        status.innerText = data.answer;
+                        input.value = "";
+                    } catch (e) { status.innerText = "Gabim lidhjeje."; }
+                }
+            </script>
+        </body>
     </html>
     """
 
-# --- LOGJIKA KRYESORE ---
+# --- LOGJIKA E AI DHE STATUSIT ---
 @app.post("/ask")
 async def ask(body: AskBody):
-    koha, data, moti = merr_kontekstin()
-    
+    global audio_ready
     if body.device_id not in bisedat:
-        bisedat[body.device_id] = [{
-            "role": "system", 
-            "content": f"Ti je Luna, asistente femër inteligjente. Sot është {data}, ora {koha}. {moti}. Përgjigju shkurt dhe shqip."
-        }]
-
+        bisedat[body.device_id] = [{"role": "system", "content": "Ti je Luna, asistente femër e ëmbël. Përgjigju shkurt në shqip."}]
+    
     bisedat[body.device_id].append({"role": "user", "content": body.text})
     
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": MODEL_AI, "messages": bisedat[body.device_id], "temperature": 0.7}
+    payload = {"model": MODEL_AI, "messages": bisedat[body.device_id]}
     
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-        
-        if r.status_code != 200:
-            print(f"GROQ ERROR: {r.text}")
-            return {"answer": "Më fal, truri im (Groq) nuk po përgjigjet. Kontrollo API Key."}
-
         pergjigja = r.json()["choices"][0]["message"]["content"].strip()
-        bisedat[body.device_id].append({"role": "assistant", "content": pergjigja})
         
-        await gjenero_ze_femer(pergjigja)
+        # Gjenerojmë audion
+        if await gjenero_ze_femer(pergjigja):
+            audio_ready = True # Lajmërojmë ESP32
+            
         return {"answer": pergjigja}
     except Exception as e:
-        print(f"SYSTEM ERROR: {e}")
-        return {"answer": "Ndodhi një gabim teknik."}
+        return {"answer": "Gabim teknik."}
+
+@app.get("/status")
+async def get_status():
+    global audio_ready
+    return {"ready": audio_ready}
 
 @app.get("/get_audio")
 async def get_audio():
-    return FileResponse("luna_voice.mp3")
+    if os.path.exists("luna_voice.mp3"):
+        return FileResponse("luna_voice.mp3", media_type="audio/mpeg")
+    return {"error": "Jo audio"}
+
+@app.get("/done")
+async def set_done():
+    global audio_ready
+    audio_ready = False
+    return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn
