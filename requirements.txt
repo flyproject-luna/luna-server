@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-requests
+httpx
 edge-tts
 pydantic
+python-multipart
