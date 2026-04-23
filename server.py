@@ -242,25 +242,24 @@ def krijo_system_prompt(moti: str, koha: str) -> str:
 
 
 async def pyete_ai(mesazhet: list, text: str) -> str:
-    """Pyetje te OpenRouter AI"""
+    """Pyetje te Groq AI - i shpejte dhe falas"""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://api.groq.com/openai/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://luna-ai.app",
-                    "X-Title": "Luna AI"
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
                 },
                 json={
-                    "model": MODEL_AI,
+                    "model": "llama-3.1-8b-instant",
                     "messages": mesazhet,
                     "temperature": 0.75,
                     "max_tokens": 300
                 }
             )
-            return r.json()["choices"][0]["message"]["content"].strip()
+            data = r.json()
+            return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"Gabim AI: {e}")
         return "Më fal, nuk mund të përgjigjem tani. Provo përsëri!"
