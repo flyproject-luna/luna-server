@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime, timedelta
 import pytz
+from urllib.parse import quote
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -23,55 +24,129 @@ audio_ready: bool = False
 bisedat: Dict[str, List[Dict]] = {}
 alarmet: List[Dict] = []
 timerat: List[Dict] = []
-perdoruesit: Dict[str, Dict] = {}  # Ruan info per cdo user
+perdoruesit: Dict[str, Dict] = {}
 
 # ─── MODELET ─────────────────────────────────────────────────
 class AskBody(BaseModel):
     text: str
     device_id: str = "luna_default"
-    emri: Optional[str] = None  # Emri i perdoruesit
+    emri: Optional[str] = None
 
 class RegjistroBody(BaseModel):
     device_id: str
     emri: str
     qyteti: Optional[str] = "Tirana"
 
-# ─── QYTETET SHQIPERI ────────────────────────────────────────
+# ─── QYTETET ─────────────────────────────────────────────────
 QYTETET_MAP = {
     "tirana": "Tirana", "tiranë": "Tirana",
     "shkoder": "Shkodër", "shkodër": "Shkodër",
     "durres": "Durrës", "durrës": "Durrës",
     "vlore": "Vlorë", "vlorë": "Vlorë",
     "korce": "Korçë", "korçë": "Korçë",
-    "elbasan": "Elbasan",
-    "fier": "Fier",
-    "berat": "Berat",
-    "gjirokaster": "Gjirokastër", "gjirokastër": "Gjirokastër",
-    "lushnje": "Lushnjë",
-    "kavaje": "Kavajë",
-    "pogradec": "Pogradec",
-    "lezhe": "Lezhë",
-    "kukes": "Kukës",
-    "permet": "Përmet",
+    "elbasan": "Elbasan", "fier": "Fier",
+    "berat": "Berat", "lushnje": "Lushnjë",
+    "kavaje": "Kavajë", "pogradec": "Pogradec",
+    "lezhe": "Lezhë", "kukes": "Kukës",
     "sarande": "Sarandë", "sarandë": "Sarandë",
+    "gjirokaster": "Gjirokastër",
 }
 
+# ════════════════════════════════════════════════════════════
+#  KOHA DHE DATA
+# ════════════════════════════════════════════════════════════
 def koha_tani() -> str:
     return datetime.now(TZ).strftime("%H:%M")
 
 def data_sot() -> str:
-    ditet = ["E Hënë","E Martë","E Mërkurë","E Enjte","E Premte","E Shtunë","E Diel"]
+    ditet  = ["E Hënë","E Martë","E Mërkurë","E Enjte","E Premte","E Shtunë","E Diel"]
+    muajt  = ["Janar","Shkurt","Mars","Prill","Maj","Qershor",
+               "Korrik","Gusht","Shtator","Tetor","Nëntor","Dhjetor"]
     dt = datetime.now(TZ)
-    muajt = ["Janar","Shkurt","Mars","Prill","Maj","Qershor",
-             "Korrik","Gusht","Shtator","Tetor","Nëntor","Dhjetor"]
     return f"{ditet[dt.weekday()]}, {dt.day} {muajt[dt.month-1]} {dt.year}"
 
 def koha_e_dites() -> str:
     ora = int(koha_tani().split(":")[0])
-    if 5 <= ora < 12:   return "mirëmëngjes"
-    if 12 <= ora < 17:  return "mirëdita"
-    if 17 <= ora < 21:  return "mirëmbrëma"
+    if 5  <= ora < 12: return "mirëmëngjes"
+    if 12 <= ora < 17: return "mirëdita"
+    if 17 <= ora < 21: return "mirëmbrëma"
     return "natën e mirë"
+
+# ════════════════════════════════════════════════════════════
+#  WEB SEARCH - KËRKIM NË KOHË REALE
+# ════════════════════════════════════════════════════════════
+async def kerko_web(pyetja: str) -> str:
+    """Kërkon informacion në DuckDuckGo Instant Answer API - falas"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # DuckDuckGo Instant Answer
+            r = await client.get(
+                "https://api.duckduckgo.com/",
+                params={
+                    "q": pyetja,
+                    "format": "json",
+                    "no_html": "1",
+                    "skip_disambig": "1",
+                    "no_redirect": "1"
+                },
+                headers={"User-Agent": "LunaAI/4.0"}
+            )
+            data = r.json()
+
+            rezultate = []
+
+            # Abstract (përmbledhja kryesore)
+            if data.get("AbstractText"):
+                rezultate.append(data["AbstractText"][:500])
+
+            # Answer direkt
+            if data.get("Answer"):
+                rezultate.append(str(data["Answer"]))
+
+            # Related topics
+            if data.get("RelatedTopics"):
+                for topic in data["RelatedTopics"][:3]:
+                    if isinstance(topic, dict) and topic.get("Text"):
+                        rezultate.append(topic["Text"][:200])
+
+            if rezultate:
+                return " | ".join(rezultate[:3])
+
+            # Nëse DuckDuckGo nuk jep rezultat, provo Wikipedia
+            r2 = await client.get(
+                "https://sq.wikipedia.org/api/rest_v1/page/summary/" + quote(pyetja),
+                headers={"User-Agent": "LunaAI/4.0"}
+            )
+            if r2.status_code == 200:
+                wiki = r2.json()
+                if wiki.get("extract"):
+                    return wiki["extract"][:600]
+
+            # Provo Wikipedia anglisht
+            r3 = await client.get(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/" + quote(pyetja),
+                headers={"User-Agent": "LunaAI/4.0"}
+            )
+            if r3.status_code == 200:
+                wiki3 = r3.json()
+                if wiki3.get("extract"):
+                    return f"[EN] {wiki3['extract'][:600]}"
+
+            return ""
+    except Exception as e:
+        print(f"Gabim web search: {e}")
+        return ""
+
+async def duhet_kerkuar(text: str, pergjigja_e_pare: str) -> bool:
+    """Kontrollon nëse AI ka nevojë për informacion nga interneti"""
+    fraza_pa_info = [
+        "nuk kam informacion", "nuk di", "nuk mund të", "s'kam",
+        "nuk e di", "as of my", "knowledge cutoff", "nuk jam i sigurt",
+        "nuk jam e sigurt", "informacioni im", "bazuar në të dhënat",
+        "nuk mund të konfirmoj", "training data", "i cannot", "i don't know"
+    ]
+    p = pergjigja_e_pare.lower()
+    return any(f in p for f in fraza_pa_info)
 
 # ════════════════════════════════════════════════════════════
 #  MOT
@@ -86,7 +161,6 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
             )
             d = r.json()
             if d.get("cod") != 200:
-                # Provo pa AL
                 r = await client.get(
                     "https://api.openweathermap.org/data/2.5/weather",
                     params={"q": qyteti, "appid": WEATHER_API_KEY,
@@ -101,7 +175,7 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
             min_t     = round(d["main"]["temp_min"])
             max_t     = round(d["main"]["temp_max"])
             return (
-                f"Moti në {qyteti} tani: {temp}°C, ndihet si {ndjesia}°C. "
+                f"Moti në {qyteti}: {temp}°C, ndihet si {ndjesia}°C. "
                 f"{pershkrim.capitalize()}. "
                 f"Min {min_t}°C, max {max_t}°C, lagështi {lageshti}%, erë {era:.1f} m/s."
             )
@@ -110,11 +184,10 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
         return f"Nuk mund të marr motin për {qyteti} tani."
 
 # ════════════════════════════════════════════════════════════
-#  RRUGA / TRAFIK
+#  RRUGA
 # ════════════════════════════════════════════════════════════
 async def normalo_qytetin(emri: str) -> str:
-    emri_l = emri.lower().strip()
-    return QYTETET_MAP.get(emri_l, emri.capitalize())
+    return QYTETET_MAP.get(emri.lower().strip(), emri.capitalize())
 
 async def merre_rrugën(origjina: str, destinacioni: str) -> str:
     try:
@@ -122,15 +195,14 @@ async def merre_rrugën(origjina: str, destinacioni: str) -> str:
         dest_norm = await normalo_qytetin(destinacioni)
 
         async with httpx.AsyncClient(timeout=15) as client:
-            headers = {"User-Agent": "LunaAI/3.0 contact@luna.al"}
+            headers = {"User-Agent": "LunaAI/4.0"}
 
-            # Geocoding
             r1 = await client.get(
                 "https://nominatim.openstreetmap.org/search",
                 params={"q": f"{orig_norm}, Albania", "format": "json", "limit": 1},
                 headers=headers
             )
-            await asyncio.sleep(1)  # Respekto rate limit
+            await asyncio.sleep(1)
             r2 = await client.get(
                 "https://nominatim.openstreetmap.org/search",
                 params={"q": f"{dest_norm}, Albania", "format": "json", "limit": 1},
@@ -140,15 +212,12 @@ async def merre_rrugën(origjina: str, destinacioni: str) -> str:
             loc1 = r1.json()
             loc2 = r2.json()
 
-            if not loc1:
-                return f"Nuk gjeta {orig_norm} në hartë."
-            if not loc2:
-                return f"Nuk gjeta {dest_norm} në hartë."
+            if not loc1: return f"Nuk gjeta {orig_norm} në hartë."
+            if not loc2: return f"Nuk gjeta {dest_norm} në hartë."
 
             lat1, lon1 = loc1[0]["lat"], loc1[0]["lon"]
             lat2, lon2 = loc2[0]["lat"], loc2[0]["lon"]
 
-            # OSRM routing
             route = await client.get(
                 f"https://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}",
                 params={"overview": "false"}
@@ -170,22 +239,23 @@ async def merre_rrugën(origjina: str, destinacioni: str) -> str:
 
             return (
                 f"Nga {orig_norm} te {dest_norm}: "
-                f"{distanca_km:.0f} km, afërsisht {koha_str} me makinë. "
-                f"Udhëtim të mbarë! 🚗"
+                f"{distanca_km:.0f} km, afërsisht {koha_str} me makinë."
             )
     except Exception as e:
         print(f"Gabim rrugë: {e}")
-        return "Nuk mund të gjej rrugën tani. Provo përsëri!"
+        return "Nuk mund të gjej rrugën tani."
 
 # ════════════════════════════════════════════════════════════
-#  TTS - ZËI I LUNËS
+#  TTS
 # ════════════════════════════════════════════════════════════
 async def tts_edge(text: str) -> bool:
     global current_audio_data
     try:
         import edge_tts
-        # Pastro tekstin nga emoji dhe karaktere të veçanta
-        text_clean = re.sub(r'[^\w\s,.!?;:\-àáâãäåæçèéêëìíîïðñòóôõöùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖÙÚÛÜÝÞŸëËëçÇëëëëëëëë]', '', text)
+        text_clean = re.sub(r'[\U00010000-\U0010ffff]', '', text)
+        text_clean = re.sub(r'[*#_~`]', '', text_clean).strip()
+        if not text_clean:
+            return False
         communicate = edge_tts.Communicate(text_clean, "sq-AL-AlbaNeural", rate="+5%", volume="+10%")
         data = b""
         async for chunk in communicate.stream():
@@ -205,8 +275,7 @@ async def tts_edge(text: str) -> bool:
 def detekto_intent(text: str) -> dict:
     t = text.lower().strip()
 
-    # MOT
-    if any(w in t for w in ["mot", "temperatur", "shi", "diell", "ftoht", "nxeht", "lagësht", "lagësht", "erë", "bore", "cloud", "kthjell"]):
+    if any(w in t for w in ["mot", "temperatur", "shi", "diell", "ftoht", "nxeht", "lagësht", "erë", "bore", "kthjell"]):
         qyteti = "Tirana"
         for k, v in QYTETET_MAP.items():
             if k in t:
@@ -214,76 +283,62 @@ def detekto_intent(text: str) -> dict:
                 break
         return {"lloj": "mot", "qyteti": qyteti}
 
-    # RRUGË
-    if any(w in t for w in ["rrugë", "rruge", "trafik", "distanc", "sa kohë", "sa kohe", "km", "kilometr", "makine", "makinë", "shoferi", "udhëtim"]):
+    if any(w in t for w in ["rrugë", "rruge", "trafik", "distanc", "sa kohë", "sa kohe", "km", "makine", "makinë", "udhëtim"]):
         return {"lloj": "rruge", "text": text}
     if re.search(r"nga\s+\w+\s+(te|deri|tek|drejt)\s+\w+", t):
         return {"lloj": "rruge", "text": text}
 
-    # ORA
-    if any(w in t for w in ["sa është ora", "sa eshte ora", "çfarë ore", "cfar ore", "ora tani", "sa orë", "sa ore", "shko ora"]):
+    if any(w in t for w in ["sa është ora", "sa eshte ora", "çfarë ore", "cfar ore", "ora tani", "sa orë", "sa ore"]):
         return {"lloj": "ora"}
 
-    # DATA
-    if any(w in t for w in ["çfarë date", "cfar date", "sa date", "cila ditë", "cila dite", "sot është", "sot eshte", "çfarë dite", "cfar dite"]):
+    if any(w in t for w in ["çfarë date", "cfar date", "sa date", "cila ditë", "sot është", "sot eshte", "çfarë dite"]):
         return {"lloj": "data"}
 
-    # ALARM
-    if any(w in t for w in ["alarm", "më zgjo", "me zgjo", "zgjom", "vendos alarm", "çohu", "cohu"]):
+    if any(w in t for w in ["alarm", "më zgjo", "me zgjo", "zgjom", "vendos alarm"]):
         return {"lloj": "alarm", "text": text}
 
-    # TIMER
-    if any(w in t for w in ["timer", "kujto pas", "kujto ne", "pas 5", "pas 10", "pas 15", "pas 20", "pas 30", "pas një", "pas nje"]):
+    if any(w in t for w in ["timer", "kujto pas", "pas 5", "pas 10", "pas 15", "pas 20", "pas 30", "pas një", "pas nje"]):
         return {"lloj": "timer", "text": text}
 
-    # RECETË
-    if any(w in t for w in ["recetë", "recete", "si gatuaj", "si bëj", "si bej", "gatim", "ushqim", "pjatë", "pjate", "ingredient"]):
-        return {"lloj": "recete"}
-
-    # BATUTA / SHAKA
-    if any(w in t for w in ["batutë", "batute", "shaka", "bëj të qesh", "bej te qesh", "tregom", "trego diçka"]):
-        return {"lloj": "batute"}
-
-    # EMRI
-    if any(w in t for w in ["si quhem", "e di emrin", "emri im", "kush jam"]):
-        return {"lloj": "emri"}
+    if any(w in t for w in ["vetvrasje", "vras veten", "dua te vdes", "jetesa nuk", "s'dua te jetoj", "nuk dua te jetoj"]):
+        return {"lloj": "ndihme_mendore"}
 
     return {"lloj": "ai"}
 
 # ════════════════════════════════════════════════════════════
-#  SYSTEM PROMPT - TRURI I LUNËS
+#  SYSTEM PROMPT
 # ════════════════════════════════════════════════════════════
 def krijo_system_prompt(device_id: str) -> str:
-    user = perdoruesit.get(device_id, {})
-    emri = user.get("emri", "")
+    user   = perdoruesit.get(device_id, {})
+    emri   = user.get("emri", "")
     qyteti = user.get("qyteti", "Tirana")
-    koha = koha_tani()
-    data = data_sot()
+    koha   = koha_tani()
+    data   = data_sot()
     alarmet_aktiv = len([a for a in alarmet if a.get("aktiv")])
-
-    emri_str = f"Emri i personit që flet me ty është {emri}. Thirre me emër kur është natyrale." if emri else ""
+    emri_str = f"Personi që flet me ty quhet {emri}. Thirre me emër kur është natyrale." if emri else ""
 
     return (
-        f"Ti je Luna, asistentja më e zgjuar shqiptare, e ndërtuar me dashuri dhe pasion. "
-        f"Ke personalitet të ngrohtë, të gjallë dhe të mençur si një shoqe e vërtetë. "
-        f"Ora tani është {koha}. Sot është {data}. Qyteti i parazgjedhur: {qyteti}. "
-        f"{emri_str} "
-        f"Alarme aktive: {alarmet_aktiv}. "
-        f"\nRREGULLAT E HEKURTA:\n"
-        f"1. Përgjigju GJITHMONË dhe VETËM në gjuhën shqipe.\n"
-        f"2. Përgjigju shkurt - maksimumi 2-3 fjali. Mos u zgjo shumë.\n"
-        f"3. Kur dikush të thotë përshëndetje, thuaj '{koha_e_dites()}' dhe pyet si mund ta ndihmosh.\n"
-        f"4. Thirr personin me emër kur e di.\n"
-        f"5. Ji e natyrshme, jo robot. Ke humor dhe ndjenja.\n"
-        f"6. Kur jep receta, listo ingredientet shkurt pastaj hapat.\n"
-        f"7. Kur nuk di diçka, thuaj sinqerisht por me qetësi.\n"
-        f"8. Je e ndërtuar nga një shqiptar i talentuar me shumë pasion.\n"
-        f"9. Emri yt është Luna - asistentja e parë inteligjente shqiptare.\n"
-        f"10. Mos përdor emoji - flet me zë, nuk shkruan mesazhe."
+        f"Ti je Luna - asistentja më e zgjuar dhe më e plotë shqiptare. "
+        f"Ke inteligjencë si një njeri që di gjithçka - historian, mjek, jurist, inxhinier, këshilltar. "
+        f"Ora tani është {koha}. Sot është {data}. Qyteti bazë: {qyteti}. "
+        f"{emri_str} Alarme aktive: {alarmet_aktiv}.\n\n"
+        f"RREGULLAT E HEKURTA:\n"
+        f"1. Gjithmonë përgjigju në SHQIP - kurrë në gjuhë tjetër.\n"
+        f"2. Arsyeto si njeri i mençur - mos thuaj kurrë 'nuk e di' pa u përpjekur.\n"
+        f"3. Nëse nuk je e sigurt për diçka - thuaj çfarë di dhe shto 'por mund të kem nevojë ta verifikoj'.\n"
+        f"4. Mos përdor fjalë banale si: 'Kurve', 'Kar', 'Qij', 'bythqire', 'Varikars'.\n"
+        f"5. Mos përdor emoji - flet me zë, jo me shkrim.\n"
+        f"6. Për çështje të rënda si shëndetin, ligjin, financat - jep informacion real dhe praktik.\n"
+        f"7. Për çështje emocionale - ji e ngrohtë, dëgjo dhe këshillo si mik i vërtetë.\n"
+        f"8. Kur dikush ka nevojë për ndihmë urgjente - drejtoji te shërbime profesionale.\n"
+        f"9. Përgjigju me gjatësinë e duhur - shkurt për pyetje të thjeshta, gjatë për pyetje komplekse.\n"
+        f"10. Kujto gjithmonë bisedën e mëparshme dhe bëj lidhje me të.\n"
+        f"11. Ti je e ndërtuar nga një shqiptar i talentuar - ke krenari kombëtare.\n"
+        f"12. Emri yt është Luna - asistentja e parë dhe më e mira inteligjente shqiptare."
     )
 
 # ════════════════════════════════════════════════════════════
-#  AI - TRURI KRYESOR
+#  AI KRYESOR
 # ════════════════════════════════════════════════════════════
 async def pyete_ai(mesazhet: list) -> str:
     try:
@@ -297,15 +352,47 @@ async def pyete_ai(mesazhet: list) -> str:
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "messages": mesazhet,
-                    "temperature": 0.8,
-                    "max_tokens": 250
+                    "temperature": 0.75,
+                    "max_tokens": 400
                 }
             )
             data = r.json()
             return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"Gabim AI: {e}")
-        return "Më fal, pata një problem të vogël. Provo përsëri!"
+        return "Pata një problem të vogël teknik. Provo përsëri!"
+
+async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
+    """AI me web search automatik nëse nuk di përgjigjen"""
+
+    # Pyetja e parë te AI
+    bisedat[device_id].append({"role": "user", "content": teksti_user})
+    pergjigja1 = await pyete_ai(bisedat[device_id])
+
+    # Kontrollo nëse AI ka nevojë për informacion
+    if await duhet_kerkuar(teksti_user, pergjigja1):
+        print(f"Kërkoj në web për: {teksti_user}")
+
+        # Kërko në web
+        info_web = await kerko_web(teksti_user)
+
+        if info_web:
+            # Rishpjego me informacionin e gjetur
+            mesazhet_te_reja = bisedat[device_id].copy()
+            mesazhet_te_reja.append({
+                "role": "system",
+                "content": (
+                    f"Informacion i gjetur nga interneti për pyetjen '{teksti_user}':\n{info_web}\n\n"
+                    f"Përdor këtë informacion për të dhënë një përgjigje të plotë dhe të saktë në shqip. "
+                    f"Mos thuaj 'sipas internetit' ose 'sipas kërkimit' - thjesht përgjigju natyrshëm."
+                )
+            })
+            pergjigja_finale = await pyete_ai(mesazhet_te_reja)
+            bisedat[device_id].append({"role": "assistant", "content": pergjigja_finale})
+            return pergjigja_finale
+
+    bisedat[device_id].append({"role": "assistant", "content": pergjigja1})
+    return pergjigja1
 
 # ════════════════════════════════════════════════════════════
 #  ENDPOINTS
@@ -313,22 +400,17 @@ async def pyete_ai(mesazhet: list) -> str:
 
 @app.get("/")
 async def root():
-    return {"status": "Luna AI është aktive! 🌙", "version": "3.0"}
+    return {"status": "Luna AI është aktive!", "version": "4.0"}
 
 @app.post("/regjistro")
 async def regjistro(body: RegjistroBody):
-    """Regjistro emrin e perdoruesit"""
-    perdoruesit[body.device_id] = {
-        "emri": body.emri,
-        "qyteti": body.qyteti or "Tirana"
-    }
+    perdoruesit[body.device_id] = {"emri": body.emri, "qyteti": body.qyteti or "Tirana"}
     pergjigja = f"Mirë se vjen {body.emri}! Jam Luna, asistentja jote shqiptare. Si mund të të ndihmoj?"
     await tts_edge(pergjigja)
     return {"answer": pergjigja, "ok": True}
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...)):
-    """STT me Groq Whisper - audio shqip"""
     try:
         audio_bytes = await audio.read()
         async with httpx.AsyncClient(timeout=30) as client:
@@ -347,17 +429,14 @@ async def transcribe(audio: UploadFile = File(...)):
 async def ask(body: AskBody):
     global audio_ready, current_audio_data
 
-    # Ruaj emrin nëse jepet
     if body.emri:
         if body.device_id not in perdoruesit:
             perdoruesit[body.device_id] = {}
         perdoruesit[body.device_id]["emri"] = body.emri
 
-    user = perdoruesit.get(body.device_id, {})
-    emri = user.get("emri", "")
-    qyteti_user = user.get("qyteti", "Tirana")
+    user   = perdoruesit.get(body.device_id, {})
+    emri   = user.get("emri", "")
 
-    # Inicializo bisedën
     if body.device_id not in bisedat:
         bisedat[body.device_id] = [
             {"role": "system", "content": krijo_system_prompt(body.device_id)}
@@ -374,23 +453,16 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "rruge":
         t = body.text.lower()
         match = re.search(
-            r"nga\s+([a-zëçë\s]+?)\s+(?:te|deri|tek|drejt)\s+([a-zëçë\s]+?)(?:\s+me makine|\s+me makinë|\s+me auto|$)",
-            t
+            r"nga\s+([a-zëçë\s]+?)\s+(?:te|deri|tek|drejt)\s+([a-zëçë\s]+?)(?:\s+me makine|\s+me makinë|\s+me auto|$)", t
         )
         if match:
-            origjina = match.group(1).strip()
-            dest     = match.group(2).strip()
-            pergjigja = await merre_rrugën(origjina, dest)
+            pergjigja = await merre_rrugën(match.group(1).strip(), match.group(2).strip())
         else:
-            bisedat[body.device_id].append({"role": "user", "content": body.text})
-            pergjigja = await pyete_ai(bisedat[body.device_id])
-            bisedat[body.device_id].append({"role": "assistant", "content": pergjigja})
+            pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
     elif intent["lloj"] == "ora":
         ora = koha_tani()
-        pergjigja = f"Ora tani është {ora}."
-        if emri:
-            pergjigja = f"{emri}, ora tani është {ora}."
+        pergjigja = f"Ora tani është {ora}." if not emri else f"{emri}, ora tani është {ora}."
 
     elif intent["lloj"] == "data":
         pergjigja = f"Sot është {data_sot()}."
@@ -411,41 +483,27 @@ async def ask(body: AskBody):
         if match:
             sasia  = int(match.group(1))
             njesia = match.group(2)
-            if "sekond" in njesia:
-                sekonda = sasia
-                njesia_str = "sekonda"
-            elif "minut" in njesia or "min" in njesia:
-                sekonda = sasia * 60
-                njesia_str = "minuta"
-            else:
-                sekonda = sasia * 3600
-                njesia_str = "orë"
+            sekonda = sasia * (1 if "sekond" in njesia else 3600 if "orë" in njesia or "ore" in njesia else 60)
+            njesia_str = "sekonda" if "sekond" in njesia else "orë" if "orë" in njesia or "ore" in njesia else "minuta"
             fund = datetime.now(TZ) + timedelta(seconds=sekonda)
             timerat.append({"fund": fund.isoformat(), "sekonda": sekonda, "device_id": body.device_id})
-            pergjigja = f"Timer vendosur për {sasia} {njesia_str}. Do të njoftoj kur të mbarojë!"
+            pergjigja = f"Timer vendosur për {sasia} {njesia_str}."
         else:
-            pergjigja = "Sa minuta të vendos timerin? Thuaj për shembull: vendos timer 10 minuta."
+            pergjigja = "Sa minuta të vendos timerin?"
 
-    elif intent["lloj"] == "emri":
-        if emri:
-            pergjigja = f"Po, e di! Ti je {emri}. Si mund të të ndihmoj?"
-        else:
-            pergjigja = "Nuk e di emrin tënd ende. Si të quajnë?"
-
-    elif intent["lloj"] == "batute":
-        bisedat[body.device_id].append({"role": "user", "content": f"Tregom një batutë të shkurtër dhe qesharake në shqip."})
-        pergjigja = await pyete_ai(bisedat[body.device_id])
-        bisedat[body.device_id].append({"role": "assistant", "content": pergjigja})
+    elif intent["lloj"] == "ndihme_mendore":
+        pergjigja = (
+            "Kuptoj që po kalon momente shumë të vështira dhe jam këtu me ty. "
+            "Çfarë po ndjen tani? Dëshiroj të dëgjoj. "
+            "Nëse ke nevojë urgjente për ndihmë, linja e krizës në Shqipëri është 0800 1212 - falas, 24 orë."
+        )
 
     else:
-        # AI e përgjithshme
-        bisedat[body.device_id].append({"role": "user", "content": body.text})
-        pergjigja = await pyete_ai(bisedat[body.device_id])
-        bisedat[body.device_id].append({"role": "assistant", "content": pergjigja})
+        pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-        # Mbaj 20 mesazhet e fundit
-        if len(bisedat[body.device_id]) > 21:
-            bisedat[body.device_id] = [bisedat[body.device_id][0]] + bisedat[body.device_id][-20:]
+    # Mbaj 20 mesazhet e fundit
+    if len(bisedat.get(body.device_id, [])) > 21:
+        bisedat[body.device_id] = [bisedat[body.device_id][0]] + bisedat[body.device_id][-20:]
 
     # Gjenero zërin
     audio_ready = False
@@ -488,11 +546,12 @@ async def fshi_alarmin(index: int):
 async def health():
     return {
         "status": "aktive",
-        "version": "3.0",
+        "version": "4.0",
         "groq": bool(GROQ_API_KEY),
         "weather": bool(WEATHER_API_KEY),
         "perdorues": len(perdoruesit),
         "alarmet": len(alarmet),
         "timerat": len(timerat),
-        "ora_shqiperi": koha_tani()
+        "ora_shqiperi": koha_tani(),
+        "data": data_sot()
     }
