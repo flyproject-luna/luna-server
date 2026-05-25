@@ -13,6 +13,7 @@ import edge_tts
 
 app = FastAPI()
 
+# CORS plotësisht i hapur për të lejuar skedarin tënd HTML lokal
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -85,25 +86,30 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
     except Exception:
         return "Nuk arrita ta marr motin."
 
-# Gjenerimi i audios me zërin e vajzës shqiptare (AlbaNeural) në Base64
+# Funksioni i ri asinkron plotësisht i stabilizuar
 async def tts_edge_base64(text: str) -> str:
     try:
         text_clean = pastro_pergjigje(text)
-        if not text_clean: return ""
+        if not text_clean: 
+            return ""
         
-        # Përdorim zërin zyrtar premium të vajzës shqiptare
+        # Zëri premium i vajzës shqiptare
         communicate = edge_tts.Communicate(text_clean, "sq-AL-AlbaNeural", rate="+0%", volume="+25%")
         audio_bytes = b""
         
+        # Grumbullimi i të dhënave në mënyrë të sigurt
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 audio_bytes += chunk["data"]
-                
+        
         if audio_bytes:
+            print(f"Sukses! U gjeneruan {len(audio_bytes)} bytes audio.")
             return base64.b64encode(audio_bytes).decode('utf-8')
+        
+        print("Gabim: Nuk u gjenerua asnjë byte audio.")
         return ""
     except Exception as e:
-        print(f"Gabim gjatë gjenerimit të zërit: {e}")
+        print(f"Gabim i rëndë në TTS: {e}")
         return ""
 
 def detekto_intent(text: str) -> dict:
@@ -145,6 +151,9 @@ async def pyete_ai(mesazhet: list) -> str:
         return "Pata një problem me inteligjencën."
 
 async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
+    if device_id not in bisedat:
+        bisedat[device_id] = [{"role": "system", "content": krijo_system_prompt(device_id)}]
+        
     bisedat[device_id].append({"role": "user", "content": teksti_user})
     p1 = await pyete_ai(bisedat[device_id])
     if await duhet_kerkuar(p1):
@@ -157,7 +166,7 @@ async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Luna AI AlbaNeural Female Voice Online"}
+    return {"status": "Luna AI Stable AlbaNeural Voice Online"}
 
 @app.post("/ask")
 async def ask(body: AskBody):
@@ -172,7 +181,7 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
     else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-    # Thërrasim funksionin e ri asinkron për zërin e vajzës
+    # Thirrja e funksionit të stabilizuar asinkron
     audio_base64 = await tts_edge_base64(pergjigja)
 
     return {
