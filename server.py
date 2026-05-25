@@ -2,19 +2,15 @@ import os
 import re
 import asyncio
 import httpx
-import base64
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
 import pytz
-from gtts import gTTS
-import io
 
 app = FastAPI()
 
-# CORS plotësisht i hapur për uebsajtin tënd lokal
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -87,29 +83,6 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
     except Exception:
         return "Nuk arrita ta marr motin."
 
-# Zëri i ri i pastër i Google TTS - Pa asnjë gabim sistemi
-def tts_google_base64(text: str) -> str:
-    try:
-        text_clean = pastro_pergjigje(text)
-        if not text_clean: 
-            return ""
-        
-        # Përdorim 'sq' për zërin femëror shqiptar të Google
-        tts = gTTS(text=text_clean, lang='sq', slow=False)
-        
-        fp = io.BytesIO()
-        tts.write_to_fp(fp)
-        fp.seek(0)
-        
-        audio_bytes = fp.read()
-        if audio_bytes:
-            print(f"Sukses i plotë! U gjeneruan {len(audio_bytes)} bytes audio.")
-            return base64.b64encode(audio_bytes).decode('utf-8')
-        return ""
-    except Exception as e:
-        print(f"Gabim në Google TTS: {e}")
-        return ""
-
 def detekto_intent(text: str) -> dict:
     t = text.lower().strip()
     if any(w in t for w in ["mot", "temperatur", "shi", "diell"]):
@@ -164,7 +137,7 @@ async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Luna AI Google TTS Standard Female Online"}
+    return {"status": "Luna AI Brain Engine Online"}
 
 @app.post("/ask")
 async def ask(body: AskBody):
@@ -179,10 +152,6 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
     else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-    # Thirrja e funksionit të ri stabël të zërit
-    audio_base64 = tts_google_base64(pergjigja)
-
     return {
-        "answer": pergjigja,
-        "audio": audio_base64
+        "answer": pergjigja
     }
