@@ -9,11 +9,12 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
 import pytz
-import edge_tts
+from gtts import gTTS
+import io
 
 app = FastAPI()
 
-# CORS plotësisht i hapur për të lejuar skedarin tënd HTML lokal
+# CORS plotësisht i hapur për uebsajtin tënd lokal
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -86,30 +87,27 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
     except Exception:
         return "Nuk arrita ta marr motin."
 
-# Funksioni i ri asinkron plotësisht i stabilizuar
-async def tts_edge_base64(text: str) -> str:
+# Zëri i ri i pastër i Google TTS - Pa asnjë gabim sistemi
+def tts_google_base64(text: str) -> str:
     try:
         text_clean = pastro_pergjigje(text)
         if not text_clean: 
             return ""
         
-        # Zëri premium i vajzës shqiptare
-        communicate = edge_tts.Communicate(text_clean, "sq-AL-AlbaNeural", rate="+0%", volume="+25%")
-        audio_bytes = b""
+        # Përdorim 'sq' për zërin femëror shqiptar të Google
+        tts = gTTS(text=text_clean, lang='sq', slow=False)
         
-        # Grumbullimi i të dhënave në mënyrë të sigurt
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_bytes += chunk["data"]
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
         
+        audio_bytes = fp.read()
         if audio_bytes:
-            print(f"Sukses! U gjeneruan {len(audio_bytes)} bytes audio.")
+            print(f"Sukses i plotë! U gjeneruan {len(audio_bytes)} bytes audio.")
             return base64.b64encode(audio_bytes).decode('utf-8')
-        
-        print("Gabim: Nuk u gjenerua asnjë byte audio.")
         return ""
     except Exception as e:
-        print(f"Gabim i rëndë në TTS: {e}")
+        print(f"Gabim në Google TTS: {e}")
         return ""
 
 def detekto_intent(text: str) -> dict:
@@ -166,7 +164,7 @@ async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Luna AI Stable AlbaNeural Voice Online"}
+    return {"status": "Luna AI Google TTS Standard Female Online"}
 
 @app.post("/ask")
 async def ask(body: AskBody):
@@ -181,8 +179,8 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
     else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-    # Thirrja e funksionit të stabilizuar asinkron
-    audio_base64 = await tts_edge_base64(pergjigja)
+    # Thirrja e funksionit të ri stabël të zërit
+    audio_base64 = tts_google_base64(pergjigja)
 
     return {
         "answer": pergjigja,
