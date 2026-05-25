@@ -9,10 +9,12 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
 import pytz
+from gtts import gTTS
+import io
 
 app = FastAPI()
 
-# CORS i hapur plotësisht për të lejuar skedarët lokalë HTML të komunikojnë pa bllokime
+# CORS plotësisht i hapur për të lejuar skedarin tënd HTML lokal
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -85,18 +87,23 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
     except Exception:
         return "Nuk arrita ta marr motin."
 
-async def tts_edge_bytes(text: str) -> bytes:
+# Gjenerimi i audios me Google TTS në mënyrë të qëndrueshme
+def tts_google_base64(text: str) -> str:
     try:
-        import edge_tts
         text_clean = pastro_pergjigje(text)
-        if not text_clean: return b""
-        communicate = edge_tts.Communicate(text_clean, "sq-AL-AlbaNeural", rate="+0%", volume="+25%")
-        data = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio": data += chunk["data"]
-        return data
-    except Exception:
-        return b""
+        if not text_clean: return ""
+        
+        # Përdorim kodin 'sq' për gjuhën shqipe
+        tts = gTTS(text=text_clean, lang='sq', slow=False)
+        
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        
+        return base64.b64encode(fp.read()).decode('utf-8')
+    except Exception as e:
+        print(f"Gabim TTS: {e}")
+        return ""
 
 def detekto_intent(text: str) -> dict:
     t = text.lower().strip()
@@ -149,7 +156,7 @@ async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Luna AI Base64 Server Online"}
+    return {"status": "Luna AI Google TTS Online"}
 
 @app.post("/ask")
 async def ask(body: AskBody):
@@ -164,12 +171,8 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
     else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-    audio_bytes = await tts_edge_bytes(pergjigja)
-    
-    # Konvertojmë audion në një string të sigurt Base64 që kalon çdo bllokim
-    audio_base64 = ""
-    if audio_bytes:
-        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+    # Thirrja e funksionit të ri Base64
+    audio_base64 = tts_google_base64(pergjigja)
 
     return {
         "answer": pergjigja,
