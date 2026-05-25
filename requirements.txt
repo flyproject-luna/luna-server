@@ -3,4 +3,4 @@ uvicorn
 httpx
 pydantic
 pytz
-edge-tts
+gTTS
