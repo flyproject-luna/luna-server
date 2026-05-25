@@ -9,12 +9,10 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
 import pytz
-from gtts import gTTS
-import io
+import edge_tts
 
 app = FastAPI()
 
-# CORS plotësisht i hapur për të lejuar skedarin tënd HTML lokal
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -87,22 +85,25 @@ async def merre_motin(qyteti: str = "Tirana") -> str:
     except Exception:
         return "Nuk arrita ta marr motin."
 
-# Gjenerimi i audios me Google TTS në mënyrë të qëndrueshme
-def tts_google_base64(text: str) -> str:
+# Gjenerimi i audios me zërin e vajzës shqiptare (AlbaNeural) në Base64
+async def tts_edge_base64(text: str) -> str:
     try:
         text_clean = pastro_pergjigje(text)
         if not text_clean: return ""
         
-        # Përdorim kodin 'sq' për gjuhën shqipe
-        tts = gTTS(text=text_clean, lang='sq', slow=False)
+        # Përdorim zërin zyrtar premium të vajzës shqiptare
+        communicate = edge_tts.Communicate(text_clean, "sq-AL-AlbaNeural", rate="+0%", volume="+25%")
+        audio_bytes = b""
         
-        fp = io.BytesIO()
-        tts.write_to_fp(fp)
-        fp.seek(0)
-        
-        return base64.b64encode(fp.read()).decode('utf-8')
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_bytes += chunk["data"]
+                
+        if audio_bytes:
+            return base64.b64encode(audio_bytes).decode('utf-8')
+        return ""
     except Exception as e:
-        print(f"Gabim TTS: {e}")
+        print(f"Gabim gjatë gjenerimit të zërit: {e}")
         return ""
 
 def detekto_intent(text: str) -> dict:
@@ -156,7 +157,7 @@ async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Luna AI Google TTS Online"}
+    return {"status": "Luna AI AlbaNeural Female Voice Online"}
 
 @app.post("/ask")
 async def ask(body: AskBody):
@@ -171,8 +172,8 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
     else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-    # Thirrja e funksionit të ri Base64
-    audio_base64 = tts_google_base64(pergjigja)
+    # Thërrasim funksionin e ri asinkron për zërin e vajzës
+    audio_base64 = await tts_edge_base64(pergjigja)
 
     return {
         "answer": pergjigja,
