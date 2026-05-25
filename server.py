@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import httpx
+import base64
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,9 +20,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GROQ_API_KEY    = os.getenv("LUNA_AI", "").strip()
-WEATHER_API_KEY = os.getenv("Luna_weather", "").strip()
-TZ              = pytz.timezone("Europe/Tirane")
+GROQ_API_KEY       = os.getenv("LUNA_AI", "").strip()
+WEATHER_API_KEY    = os.getenv("Luna_weather", "").strip()
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+TZ                 = pytz.timezone("Europe/Tirane")
+
+# Përdorim zërin premium femëror "Rachel" (21m00Tcm4TlvDq8ikWAM) që flet shqip si njeri i vërtetë
+VOICE_ID = "21m00Tcm4TlvDq8ikWAM" 
 
 bisedat: Dict[str, List[Dict]] = {}
 perdoruesit: Dict[str, Dict] = {}
@@ -31,16 +36,6 @@ class AskBody(BaseModel):
     device_id: str = "luna_default"
     emri: Optional[str] = None
 
-QYTETET_MAP = {
-    "tirana": "Tirana", "tiranë": "Tirana",
-    "shkoder": "Shkodër", "shkodër": "Shkodër",
-    "durres": "Durrës", "durrës": "Durrës",
-    "vlore": "Vlorë", "vlorë": "Vlorë",
-    "korce": "Korçë", "korçë": "Korçë",
-    "elbasan": "Elbasan", "fier": "Fier",
-    "berat": "Berat", "lushnje": "Lushnjë",
-}
-
 FJALE_BANALE = ["sigurisht", "natyrisht", "absolutisht", "me kënaqësi", "patjetër", "padyshim", "me gjithë qejf"]
 
 def koha_tani() -> str:
@@ -48,66 +43,46 @@ def koha_tani() -> str:
 
 def data_sot() -> str:
     ditet  = ["E Hënë","E Martë","E Mërkurë","E Enjte","E Premte","E Shtunë","E Diel"]
-    muajt  = ["Janar","Shkurt","Mars","Prill","Maj","Qershor","Korrik","Gusht","Shtator","Tetor","Nëntor","Dhjetor"]
+    muajt  = ["Janar","Shkurt","Mars","Prill","Maj","Qershor","Korrik","Gusht","Shtator","Tetor","Nëntor","Dimër"]
     dt = datetime.now(TZ)
-    return f"{ditet[dt.weekday()]}, {dt.day} {muajt[dt.month-1]} {dt.year}"
+    return f"{ditet[dt.weekday()]} {dt.day} {muajt[dt.month-1]}"
 
 def pastro_pergjigje(text: str) -> str:
     for f in FJALE_BANALE:
         text = re.sub(f, "", text, flags=re.IGNORECASE)
     text = re.sub(r'[\U00010000-\U0010ffff]', '', text)
     text = re.sub(r'[*#_~`]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
-async def kerko_web(pyetja: str) -> str:
+async def tts_elevenlabs_base64(text: str) -> str:
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            headers = {"User-Agent": "LunaAI/5.0"}
-            r = await client.get("https://api.duckduckgo.com/", params={"q": pyetja, "format": "json", "no_html": "1"}, headers=headers)
-            data = r.json()
-            if data.get("AbstractText"): return data["AbstractText"][:400]
-            return ""
-    except Exception:
+        text_clean = pastro_pergjigje(text)
+        if not text_clean: return ""
+        
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        }
+        data = {
+            "text": text_clean,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=data, headers=headers)
+            if response.status_code == 200:
+                return base64.b64encode(response.content).decode('utf-8')
+            else:
+                print(f"Gabim ElevenLabs: {response.text}")
+                return ""
+    except Exception as e:
+        print(f"Gabim TTS: {e}")
         return ""
-
-async def duhet_kerkuar(pergjigja: str) -> bool:
-    return any(f in pergjigja.lower() for f in ["nuk kam informacion", "nuk di", "nuk e di", "nuk jam i sigurt"])
-
-async def merre_motin(qyteti: str = "Tirana") -> str:
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get("https://api.openweathermap.org/data/2.5/weather", params={"q": f"{qyteti},AL", "appid": WEATHER_API_KEY, "units": "metric", "lang": "sq"})
-            d = r.json()
-            return f"Moti në {qyteti} është {round(d['main']['temp'])} gradë me {d['weather'][0]['description']}."
-    except Exception:
-        return "Nuk arrita ta marr motin."
-
-def detekto_intent(text: str) -> dict:
-    t = text.lower().strip()
-    if any(w in t for w in ["mot", "temperatur", "shi", "diell"]):
-        qyteti = "Tirana"
-        for k, v in QYTETET_MAP.items():
-            if k in t: qyteti = v; break
-        return {"lloj": "mot", "qyteti": qyteti}
-    if any(w in t for w in ["sa është ora", "sa eshte ora", "ora tani"]): return {"lloj": "ora"}
-    if any(w in t for w in ["çfarë date", "cfar date", "sa date"]): return {"lloj": "data"}
-    return {"lloj": "ai"}
-
-def krijo_system_prompt(device_id: str) -> str:
-    user = perdoruesit.get(device_id, {})
-    emri = user.get("emri", "")
-    qyteti = user.get("qyteti", "Tirana")
-    return (
-        f"Ti je Luna, një asistente AI shqiptare, jashtëzakonisht inteligjente, e mprehtë dhe koncize. "
-        f"Ora aktuale: {koha_tani()}. Data sot: {data_sot()}. Qyteti: {qyteti}. Personi quhet: {emri}.\n\n"
-        f"RREGULLAT:\n"
-        f"1. Përgjigju VETËM në gjuhën shqipe.\n"
-        f"2. Përgjigjet duhet të jenë super të shkurtra (1-2 fjali maksimumi).\n"
-        f"3. Ji natyrale dhe inteligjente si Alexa ose Siri.\n"
-        f"4. MOS PËRDOR fjalë klishe si: 'sigurisht', 'natyrisht', 'me kënaqësi'.\n"
-        f"5. Mos përdor asnjë emoji apo markdown pasi teksti do të lexohet automatikisht me zë."
-    )
 
 async def pyete_ai(mesazhet: list) -> str:
     try:
@@ -115,43 +90,28 @@ async def pyete_ai(mesazhet: list) -> str:
             r = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile", "messages": mesazhet, "temperature": 0.6, "max_tokens": 120}
+                json={"model": "llama-3.3-70b-versatile", "messages": mesazhet, "temperature": 0.5, "max_tokens": 100}
             )
             return pastro_pergjigje(r.json()["choices"][0]["message"]["content"].strip())
     except Exception:
-        return "Pata një problem me inteligjencën."
-
-async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
-    if device_id not in bisedat:
-        bisedat[device_id] = [{"role": "system", "content": krijo_system_prompt(device_id)}]
-        
-    bisedat[device_id].append({"role": "user", "content": teksti_user})
-    p1 = await pyete_ai(bisedat[device_id])
-    if await duhet_kerkuar(p1):
-        info = await kerko_web(teksti_user)
-        if info:
-            m_reja = bisedat[device_id][:-1] + [{"role": "user", "content": f"Pyetja: {teksti_user}\nInfo interneti: {info}\nPërgjigju shkurt."}]
-            p1 = await pyete_ai(m_reja)
-    bisedat[device_id].append({"role": "assistant", "content": p1})
-    return p1
-
-@app.get("/")
-def root():
-    return {"status": "Luna AI Brain Engine Online"}
+        return "Problem me inteligjencën."
 
 @app.post("/ask")
 async def ask(body: AskBody):
     if body.device_id not in bisedat:
-        bisedat[body.device_id] = [{"role": "system", "content": krijo_system_prompt(body.device_id)}]
+        bisedat[body.device_id] = [{
+            "role": "system", 
+            "content": f"Ti je Luna, një asistente AI shqiptare, inteligjente dhe super koncize. Përgjigju vetëm shqip, me 1 ose maksimalisht 2 fjali të shkurtra. Mos përdor asnjëherë emoji apo markdown."
+        }]
 
-    intent = detekto_intent(body.text)
-    pergjigja = ""
+    bisedat[body.device_id].append({"role": "user", "content": body.text})
+    pergjigja = await pyete_ai(bisedat[body.device_id])
+    bisedat[body.device_id].append({"role": "assistant", "content": pergjigja})
 
-    if intent["lloj"] == "mot": pergjigja = await merre_motin(intent["qyteti"])
-    elif intent["lloj"] == "ora": pergjigja = f"Ora është {koha_tani()}."
-    elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
-    else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
+    # Gjenerohet zëri njerëzor premium
+    audio_base64 = await tts_elevenlabs_base64(pergjigja)
 
     return {
-        "answer": pergjigja
+        "answer": pergjigja,
+        "audio": audio_base64
     }
