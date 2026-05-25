@@ -2,16 +2,17 @@ import os
 import re
 import asyncio
 import httpx
-from fastapi import FastAPI, Response
+import base64
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from datetime import datetime
 import pytz
-from urllib.parse import quote
 
 app = FastAPI()
 
+# CORS i hapur plotësisht për të lejuar skedarët lokalë HTML të komunikojnë pa bllokime
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -148,9 +149,8 @@ async def pergjigja_me_kerkime(device_id: str, teksti_user: str) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Luna AI Streaming Server Online"}
+    return {"status": "Luna AI Base64 Server Online"}
 
-# Endpoint-i i ri që kthen direkt audion pa rrugë dytësore
 @app.post("/ask")
 async def ask(body: AskBody):
     if body.device_id not in bisedat:
@@ -164,9 +164,14 @@ async def ask(body: AskBody):
     elif intent["lloj"] == "data": pergjigja = f"Sot është {data_sot()}."
     else: pergjigja = await pergjigja_me_kerkime(body.device_id, body.text)
 
-    # Gjenerojmë bitet e audios direkt
     audio_bytes = await tts_edge_bytes(pergjigja)
     
+    # Konvertojmë audion në një string të sigurt Base64 që kalon çdo bllokim
+    audio_base64 = ""
     if audio_bytes:
-        return Response(content=audio_bytes, media_type="audio/mpeg")
-    return Response(status_code=204)
+        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+    return {
+        "answer": pergjigja,
+        "audio": audio_base64
+    }
