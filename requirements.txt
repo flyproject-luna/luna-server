@@ -4,3 +4,4 @@ httpx
 pydantic
 pytz
 edge-tts
+python-multipart
